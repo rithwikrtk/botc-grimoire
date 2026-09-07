@@ -24,6 +24,21 @@ const SAINT_ROLES: Array<[string, string]> = [
   ['p7', 'soldier'],
 ];
 
+/**
+ * 6 seats matching the guide §2 chart exactly (3 townsfolk, 1 outsider, 1
+ * minion, 1 demon) with a Scarlet Woman in the minion slot, so executing the
+ * Imp by vote with 5+ alive exercises closeDay's promotion branch (review
+ * round 1, FIX 3).
+ */
+const SCARLET_WOMAN_ROLES: Array<[string, string]> = [
+  ['p1', 'imp'],
+  ['p2', 'scarlet_woman'],
+  ['p3', 'butler'],
+  ['p4', 'chef'],
+  ['p5', 'empath'],
+  ['p6', 'monk'],
+];
+
 function seeded(): Store {
   let tick = 1_700_000_000_000;
   const store = createStore([], () => (tick += 1000));
@@ -56,7 +71,11 @@ function seededWithSaint(opts: { poison?: string } = {}): Store {
     });
     tx.emit('ROLES_ASSIGNED', {
       assignments: Object.fromEntries(SAINT_ROLES),
-      distribution: { townsfolk: 5, outsider: 0, minion: 1, demon: 1 },
+      // Corrected (review round 1, Minor 10): the roster's Saint sits in the
+      // Outsider slot, so the true counts are 4 townsfolk / 1 outsider, not the
+      // 7-player chart's 5/0 — nothing reads this field, but a fixture that
+      // contradicts its own roster misleads the next reader.
+      distribution: { townsfolk: 4, outsider: 1, minion: 1, demon: 1 },
       setupModifiers: [],
       demonBluffs: ['virgin', 'slayer', 'mayor'],
       drunkBelief: null,
@@ -72,6 +91,84 @@ function seededWithSaint(opts: { poison?: string } = {}): Store {
         expiresAt: expiryFor('tonight_and_tomorrow', { kind: 'night', number: 1 }),
       });
     }
+    tx.emit('PHASE_ADVANCED', { phase: 'day', number: 1 });
+  });
+  return store;
+}
+
+/** Same roster as `seeded()`, stopped at night 1 (§4.7, FIX 1's night-phase guard). */
+function seededAtNight(): Store {
+  let tick = 1_700_000_000_000;
+  const store = createStore([], () => (tick += 1000));
+  store.transaction('create', (tx) => {
+    tx.emit('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: ROLES.map(([id], seat) => ({ id, name: `P${seat + 1}`, seat })),
+    });
+    tx.emit('ROLES_ASSIGNED', {
+      assignments: Object.fromEntries(ROLES),
+      distribution: { townsfolk: 4, outsider: 1, minion: 1, demon: 1 },
+      setupModifiers: [],
+      demonBluffs: null,
+      drunkBelief: null,
+      redHerring: null,
+    });
+    tx.emit('PHASE_ADVANCED', { phase: 'night', number: 1 });
+  });
+  return store;
+}
+
+/**
+ * Same roster as `seeded()`, with `masterId` marked as p3 (the Butler)'s Master
+ * during night 1, so the mark is still active on day 1 (review round 1, FIX 2).
+ */
+function seededWithButlerMaster(masterId: string): Store {
+  let tick = 1_700_000_000_000;
+  const store = createStore([], () => (tick += 1000));
+  store.transaction('create', (tx) => {
+    tx.emit('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: ROLES.map(([id], seat) => ({ id, name: `P${seat + 1}`, seat })),
+    });
+    tx.emit('ROLES_ASSIGNED', {
+      assignments: Object.fromEntries(ROLES),
+      distribution: { townsfolk: 4, outsider: 1, minion: 1, demon: 1 },
+      setupModifiers: [],
+      demonBluffs: null,
+      drunkBelief: null,
+      redHerring: null,
+    });
+    tx.emit('PHASE_ADVANCED', { phase: 'night', number: 1 });
+    tx.emit('STATUS_APPLIED', {
+      playerId: masterId,
+      status: 'master',
+      sourcePlayerId: 'p3',
+      effective: true,
+      expiresAt: expiryFor('tonight_and_tomorrow', { kind: 'night', number: 1 }),
+    });
+    tx.emit('PHASE_ADVANCED', { phase: 'day', number: 1 });
+  });
+  return store;
+}
+
+function seededWithScarletWoman(): Store {
+  let tick = 1_700_000_000_000;
+  const store = createStore([], () => (tick += 1000));
+  store.transaction('create', (tx) => {
+    tx.emit('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: SCARLET_WOMAN_ROLES.map(([id], seat) => ({ id, name: `P${seat + 1}`, seat })),
+    });
+    tx.emit('ROLES_ASSIGNED', {
+      assignments: Object.fromEntries(SCARLET_WOMAN_ROLES),
+      distribution: { townsfolk: 3, outsider: 1, minion: 1, demon: 1 },
+      setupModifiers: [],
+      // Below 7 players, no bluffs (guide §5.2).
+      demonBluffs: null,
+      drunkBelief: null,
+      redHerring: null,
+    });
+    tx.emit('PHASE_ADVANCED', { phase: 'night', number: 1 });
     tx.emit('PHASE_ADVANCED', { phase: 'day', number: 1 });
   });
   return store;
@@ -165,6 +262,10 @@ describe('day commands (§4.8, §7)', () => {
     closeNomination(store, nominationId);
     closeDay(store);
     expect(store.getState().victory).toEqual({ status: 'ongoing', reason: null });
+    // The execution still happened — only the win is suppressed (review round 1,
+    // Minor 11: without this, the assertion above also holds if closeDay never
+    // executed anyone at all).
+    expect(store.getState().players.find((p) => p.id === 'p3')?.alive).toBe(false);
   });
 
   it('refuses to begin the night once the game is decided', () => {
@@ -180,5 +281,60 @@ describe('day commands (§4.8, §7)', () => {
     const store = seeded();
     endGame(store, 'evil', 'abandoned');
     expect(store.getState().victory).toEqual({ status: 'evil', reason: 'abandoned' });
+  });
+
+  // Review round 1, FIX 1 — row 4 (§4.7) checks only `dayClosed`, `aliveCount`,
+  // `todaysExecutions` and the Mayor; nothing there checks phase. Without this
+  // guard, closeDay is reachable at night — see the docstring on closeDay for the
+  // full path (a no-execution day at 4 alive, beginNight, an Imp kill down to 3,
+  // then a mistimed closeDay) — and would hand good the game silently.
+  it('refuses to close a day that is not the current phase', () => {
+    const store = seededAtNight();
+    expect(() => closeDay(store)).toThrow(/it is not day/i);
+  });
+
+  // Review round 1, FIX 2 — the only command-layer exercise of the §16.3 ruling's
+  // permanent forensic record. §3.6 makes butlerVotesFlagged write-only (no
+  // selector reads it), so a broken wire here would silently drop every Butler
+  // violation from the audit log for a whole game with nothing else to contradict
+  // it.
+  it('records the Butler in the closed nomination\'s forensic record when they voted without their Master (§16.3)', () => {
+    const store = seededWithButlerMaster('p5');
+    const { nominationId } = nominate(store, 'p4', 'p1');
+    // The Butler (p3) votes; their Master (p5) genuinely never does.
+    castVote(store, nominationId, 'p3');
+    const result = closeNomination(store, nominationId);
+    const closed = result.events.find((e) => e.type === 'NOMINATION_CLOSED');
+    expect(closed?.payload).toMatchObject({ butlerVotesFlagged: ['p3'] });
+  });
+
+  // Review round 1, FIX 3 — DEMON_DIED is a reducer no-op (the ROLE_CHANGED in the
+  // same transaction is what moves the role), so if that ROLE_CHANGED is wrong or
+  // missing, checkVictory sees no living Demon and ends the game for good on the
+  // spot: exactly the scenario the Scarlet Woman exists to prevent, silently.
+  it('promotes the Scarlet Woman when the Demon is executed by vote with 5+ alive (§4.6, §16.9)', () => {
+    const store = seededWithScarletWoman();
+    const { nominationId } = nominate(store, 'p4', 'p1');
+    for (const voterId of ['p3', 'p4', 'p5']) castVote(store, nominationId, voterId);
+    closeNomination(store, nominationId);
+    const result = closeDay(store);
+    const demonDied = result.events.find((e) => e.type === 'DEMON_DIED');
+    // §16.1 — the dying Demon (p1) counts toward the 6 the Scarlet Woman's
+    // threshold of 5 is judged against; it is NOT 5.
+    expect(demonDied?.payload).toMatchObject({
+      aliveCountAtDeath: 6,
+      successorId: 'p2',
+      successorReason: 'scarlet_woman',
+    });
+    expect(store.getState().players.find((p) => p.id === 'p2')?.characterId).toBe('imp');
+    expect(store.getState().victory).toEqual({ status: 'ongoing', reason: null });
+  });
+
+  // Review round 1, Minor 6 — matches closeNomination's existing guard. Without
+  // it, castVote on a mistyped id silently no-ops in the reducer and raises no
+  // flag: a vote that is "recorded" and invisible.
+  it('refuses to cast a vote on an unknown nomination', () => {
+    const store = seeded();
+    expect(() => castVote(store, 'nom-does-not-exist', 'p4')).toThrow(/unknown nomination/i);
   });
 });

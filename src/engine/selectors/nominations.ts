@@ -20,9 +20,13 @@ export function threshold(view: RulesView): number {
 
 export function thresholdDerivation(view: RulesView): DerivationLine[] {
   const alive = aliveCount(view);
+  // Calls threshold() rather than recomputing ceil(alive/2) inline: §8.2's whole
+  // point is that the derivation explains the number the engine actually used,
+  // and a duplicated formula is the one way it can drift from it (review round 1,
+  // Minor 4).
   return [
     { label: 'threshold', detail: `ceil(${alive} alive / 2)` },
-    { label: 'result', detail: `-> ${Math.ceil(alive / 2)}` },
+    { label: 'result', detail: `-> ${threshold(view)}` },
   ];
 }
 
@@ -61,6 +65,32 @@ export interface FlagDraft {
 }
 
 /**
+ * The active Master a Butler is currently restricted by, or null if `player` is
+ * not a Butler under restriction right now — dead, droisoned, or with no live
+ * Master mark.
+ *
+ * Shared by `butlerViolations` (over the nomination's FINAL vote set) and
+ * `voteIssues` (the live warning as hands go up) so the eligibility test — butler
+ * ∧ alive ∧ ability functional ∧ has an active Master — exists in exactly one
+ * place. The two callers legitimately differ in WHICH vote set they check the
+ * Master against; the eligibility half is identical, and a fix applied to only
+ * one copy would let the live warning and the permanent audit record disagree
+ * with nothing to catch it — the same second-source-of-truth hazard Task 9's
+ * review flagged (review round 1, Minor 5).
+ */
+function restrictedButlerMaster(
+  view: RulesView,
+  player: RulesViewPlayer,
+): RulesViewPlayer | null {
+  if (player.characterId !== 'butler') return null;
+  // A dead Butler's ghost vote is unrestricted (§4.2, guide §12).
+  if (!player.alive) return null;
+  // A drunk or poisoned Butler's vote always counts (§7).
+  if (!abilityFunctional(view, player)) return null;
+  return masterOf(view, player.id);
+}
+
+/**
  * §7, §16.3, guide §10 — which Butlers on this nomination voted without their
  * Master, judged over the nomination's FINAL vote set.
  *
@@ -83,12 +113,7 @@ export function butlerViolations(state: GameState, nominationId: string): Player
   return nomination.votes
     .map((vote) => playerById(view, vote.voterId))
     .filter((voter) => {
-      if (voter.characterId !== 'butler') return false;
-      // A dead Butler's ghost vote is unrestricted (§4.2, guide §12).
-      if (!voter.alive) return false;
-      // A drunk or poisoned Butler's vote always counts (§7).
-      if (!abilityFunctional(view, voter)) return false;
-      const master = masterOf(view, voter.id);
+      const master = restrictedButlerMaster(view, voter);
       if (!master) return false;
       return !voted.has(master.id);
     })
@@ -195,15 +220,13 @@ export function voteIssues(
   //
   // The vote COUNTS either way: striking it would make the announced tally
   // disagree with the hands the table just watched, which leaks who the Butler is.
-  if (voter.characterId === 'butler' && voter.alive && abilityFunctional(view, voter)) {
-    const master = masterOf(view, voterId);
-    if (master && !nomination.votes.some((v) => v.voterId === master.id)) {
-      issues.push({
-        rule: 'butler_without_master',
-        class: 'social',
-        detail: `${voter.name} is the Butler and ${master.name}, their Master, has not voted yet. The vote counts; if the Master votes too, the restriction is satisfied (guide §10).`,
-      });
-    }
+  const master = restrictedButlerMaster(view, voter);
+  if (master && !nomination.votes.some((v) => v.voterId === master.id)) {
+    issues.push({
+      rule: 'butler_without_master',
+      class: 'social',
+      detail: `${voter.name} is the Butler and ${master.name}, their Master, has not voted yet. The vote counts; if the Master votes too, the restriction is satisfied (guide §10).`,
+    });
   }
   return issues;
 }
@@ -245,15 +268,13 @@ export function resolveDayExecution(state: GameState): {
     required: nomination.closedThreshold ?? liveThreshold,
   }));
 
-  const derivation: DerivationLine[] = [
-    ...tallies.map((row) => ({
-      label: row.nomineeName,
-      detail:
-        `${row.tally} vote${row.tally === 1 ? '' : 's'} against a threshold of ${row.required}` +
-        `${row.tally >= row.required ? ' (meets threshold)' : ''}` +
-        `${row.nomineeAlive ? '' : ' — already dead, cannot be executed'}`,
-    })),
-  ];
+  const derivation: DerivationLine[] = tallies.map((row) => ({
+    label: row.nomineeName,
+    detail:
+      `${row.tally} vote${row.tally === 1 ? '' : 's'} against a threshold of ${row.required}` +
+      `${row.tally >= row.required ? ' (meets threshold)' : ''}` +
+      `${row.nomineeAlive ? '' : ' — already dead, cannot be executed'}`,
+  }));
 
   const qualifying = tallies.filter((row) => row.tally >= row.required && row.nomineeAlive);
   if (qualifying.length === 0) {

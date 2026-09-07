@@ -2,6 +2,7 @@ import { characterById } from '@/editions/troubleBrewing/characters';
 import { onDemonDeath } from '../rules/demonDeath';
 import {
   butlerViolations,
+  type FlagDraft,
   nominationIssues,
   resolveDayExecution,
   tallyFor,
@@ -27,7 +28,7 @@ function nextNominationId(state: GameState): string {
 }
 
 /** §4.8 — record the action, then flag it. Never the other way round, and never instead. */
-function emitFlags(tx: Tx, issues: ReturnType<typeof nominationIssues>): void {
+function emitFlags(tx: Tx, issues: FlagDraft[]): void {
   for (const issue of issues) tx.flag(issue.rule, issue.class, issue.detail);
 }
 
@@ -50,8 +51,16 @@ export function nominate(
 }
 
 export function castVote(store: Store, nominationId: string, voterId: PlayerId): TransactionResult {
-  const issues = voteIssues(store.getState(), nominationId, voterId);
-  const name = toRulesView(store.getState()).players.find((p) => p.id === voterId)?.name;
+  const state = store.getState();
+  // Matches closeNomination's guard (review round 1, Minor 6): without this, a
+  // mistyped id makes the reducer's VOTE_CAST case no-op silently, and voteIssues
+  // returns [] for the same unknown id — a vote that is "recorded" and invisible,
+  // with no flag raised at all.
+  if (!state.nominations.some((n) => n.id === nominationId)) {
+    throw new Error(`Unknown nomination: ${nominationId}`);
+  }
+  const issues = voteIssues(state, nominationId, voterId);
+  const name = toRulesView(state).players.find((p) => p.id === voterId)?.name;
   return store.transaction(`${name} votes`, (tx) => {
     tx.emit('VOTE_CAST', { nominationId, voterId });
     emitFlags(tx, issues);
@@ -90,9 +99,22 @@ export function closeNomination(store: Store, nominationId: string): Transaction
  * Advancing to night N+1 inside this transaction therefore made evil's Saint win
  * unreachable and handed good the game for a poisoned Mayor. Call `beginNight`
  * once the win modal has been dismissed.
+ *
+ * Requires the phase to be day (review round 1, FIX 1): `beginNight` throws the
+ * symmetric check twelve lines below, and without this one, calling `closeDay`
+ * during a night is reachable, not theoretical — a no-execution day at 4 alive
+ * (row 4 wants exactly 3, so no win yet), `beginNight`, the Imp kills someone,
+ * down to 3 alive, and a mistimed second `closeDay` would commit
+ * `{ dayClosed: true }` against a NIGHT state. Row 4 does not itself check phase
+ * (§4.7), so that alone hands good the game silently, at night, in a game evil
+ * was winning. This is malformed input from the app layer, not a table rule
+ * break — nothing that happened at the table needs un-happening — so it throws,
+ * the same line already drawn by `assignRoles` and by the Mayor-bounce structural
+ * throws in `demonKill.ts`.
  */
 export function closeDay(store: Store): TransactionResult {
   const state = store.getState();
+  if (state.phase.kind !== 'day') throw new Error('It is not day');
   const execution = resolveDayExecution(state);
 
   return store.transaction(
@@ -132,12 +154,20 @@ export function closeDay(store: Store): TransactionResult {
               playerId: successor.id,
               from: successor.characterId,
               to: victim.characterId,
+              // The 'starpass' arm is unreachable THROUGH THIS CALL SITE — the
+              // onDemonDeath call above hardcodes `starpass: false`, so
+              // successorReason here is always 'scarlet_woman'. Kept as a real
+              // branch anyway: this is a type narrowing, not dead code —
+              // successorReason's type is 'scarlet_woman' | 'starpass' | null and
+              // TypeScript cannot see the local invariant — and Tasks 15/17 repeat
+              // this identical idiom at their own starpass-capable call sites, so
+              // trimming it here would leave three call sites disagreeing
+              // (review round 1, comment-only note).
               reason: demonDeath.successorReason === 'starpass' ? 'starpass' : 'scarlet_woman',
             });
           }
         }
       }
-
     },
     { dayClosed: true },
   );

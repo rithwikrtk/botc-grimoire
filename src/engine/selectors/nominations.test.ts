@@ -5,10 +5,12 @@ import { expiryFor } from '@/engine/phase';
 import {
   butlerViolations,
   nominationIssues,
+  nominationsOnDay,
   resolveDayExecution,
   tallyFor,
   threshold,
   thresholdDerivation,
+  todaysNominations,
   voteIssues,
   voteOrder,
 } from './nominations';
@@ -33,6 +35,38 @@ function day(dead: string[] = []): LogBuilder {
       cause: 'demon',
     });
   }
+  return b;
+}
+
+/**
+ * p3 is the Butler throughout this file. Builds to night 1, marks `masterId` as
+ * p3's Master, optionally poisons a player (the Butler, in every current call
+ * site — kept general so the parameter names the poisoned player rather than
+ * assuming it's always the Butler), advances to day 1, and opens nomination n1
+ * (p4 nominates p1). Shared by every fixture that needs a live Master mark, so a
+ * copy cannot drift from the others and leave a `toEqual([])` sibling vacuously
+ * green (review round 1, Minor 9).
+ */
+function withButlerMaster(masterId: string, opts: { poison?: string } = {}): LogBuilder {
+  const b = buildGame({ roles: ROLES, upTo: { kind: 'night', number: 1 } });
+  b.push('STATUS_APPLIED', {
+    playerId: masterId,
+    status: 'master',
+    sourcePlayerId: 'p3',
+    effective: true,
+    expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
+  });
+  if (opts.poison) {
+    b.push('STATUS_APPLIED', {
+      playerId: opts.poison,
+      status: 'poisoned',
+      sourcePlayerId: 'p2',
+      effective: true,
+      expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
+    });
+  }
+  b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
+  b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
   return b;
 }
 
@@ -120,20 +154,6 @@ describe('nominationIssues — advisory, never blocking (§4.8, §7)', () => {
 });
 
 describe('voteIssues — the Butler ruling (§7, §16.3)', () => {
-  function withButlerMaster(masterId: string): LogBuilder {
-    const b = buildGame({ roles: ROLES, upTo: { kind: 'night', number: 1 } });
-    b.push('STATUS_APPLIED', {
-      playerId: masterId,
-      status: 'master',
-      sourcePlayerId: 'p3',
-      effective: true,
-      expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
-    });
-    b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
-    b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
-    return b;
-  }
-
   it('flags a Butler voting without their Master as social, and the vote still counts', () => {
     const b = withButlerMaster('p5');
     const issues = voteIssues(b.state, 'n1', 'p3');
@@ -151,23 +171,7 @@ describe('voteIssues — the Butler ruling (§7, §16.3)', () => {
   });
 
   it('does not flag a poisoned Butler — their vote always counts', () => {
-    const b = buildGame({ roles: ROLES, upTo: { kind: 'night', number: 1 } });
-    b.push('STATUS_APPLIED', {
-      playerId: 'p5',
-      status: 'master',
-      sourcePlayerId: 'p3',
-      effective: true,
-      expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
-    });
-    b.push('STATUS_APPLIED', {
-      playerId: 'p3',
-      status: 'poisoned',
-      sourcePlayerId: 'p2',
-      effective: true,
-      expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
-    });
-    b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
-    b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
+    const b = withButlerMaster('p5', { poison: 'p3' });
     expect(voteIssues(b.state, 'n1', 'p3')).toEqual([]);
   });
 
@@ -198,17 +202,7 @@ describe('voteIssues — the Butler ruling (§7, §16.3)', () => {
   });
 
   it('does not report a poisoned Butler, whose vote always counts', () => {
-    const b = buildGame({ roles: ROLES, upTo: { kind: 'night', number: 1 } });
-    b.push('STATUS_APPLIED', {
-      playerId: 'p5', status: 'master', sourcePlayerId: 'p3',
-      effective: true, expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
-    });
-    b.push('STATUS_APPLIED', {
-      playerId: 'p3', status: 'poisoned', sourcePlayerId: 'p2',
-      effective: true, expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
-    });
-    b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
-    b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
+    const b = withButlerMaster('p5', { poison: 'p3' });
     b.push('VOTE_CAST', { nominationId: 'n1', voterId: 'p3' });
     expect(butlerViolations(b.state, 'n1')).toEqual([]);
   });
@@ -259,6 +253,45 @@ describe('voteIssues — dead votes (§7, guide §12)', () => {
   });
 });
 
+describe('voteIssues — a vote after the nomination has closed (§4.8)', () => {
+  it('flags it as social, and counts it anyway', () => {
+    const b = day();
+    b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
+    b.push('NOMINATION_CLOSED', { id: 'n1', auditTally: 0, auditThreshold: 4, butlerVotesFlagged: [] });
+    expect(voteIssues(b.state, 'n1', 'p5')[0]).toMatchObject({
+      class: 'social',
+      rule: 'vote_after_close',
+    });
+    // §4.8 — the app never silently alters a tally. The vote lands anyway.
+    b.push('VOTE_CAST', { nominationId: 'n1', voterId: 'p5' });
+    expect(tallyFor(b.state.nominations[0]!)).toBe(1);
+  });
+});
+
+describe('todaysNominations (§7)', () => {
+  it(
+    'is empty at night, even though night N shares its phase number with the day that follows',
+    () => {
+      const b = buildGame({ roles: ROLES, upTo: { kind: 'night', number: 1 } });
+      // Pushed directly into the log for the test's sake — in play this only
+      // happens by day — so it carries `day: 1`, same as tonight's phase number.
+      b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
+      expect(todaysNominations(b.state)).toEqual([]);
+    },
+  );
+});
+
+describe('nominationsOnDay (the Undertaker\'s read, §7)', () => {
+  it('is readable on a later day, unlike todaysNominations', () => {
+    const b = day();
+    b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
+    b.push('DAY_CLOSED', {});
+    b.push('PHASE_ADVANCED', { phase: 'night', number: 2 });
+    expect(nominationsOnDay(b.state, 1).map((n) => n.id)).toEqual(['n1']);
+    expect(todaysNominations(b.state)).toEqual([]);
+  });
+});
+
 describe('resolveDayExecution (§7, §16.8)', () => {
   function vote(b: LogBuilder, nominationId: string, voters: string[]): LogBuilder {
     for (const voterId of voters) b.push('VOTE_CAST', { nominationId, voterId });
@@ -303,16 +336,7 @@ describe('resolveDayExecution (§7, §16.8)', () => {
   });
 
   it('counts an invalid Butler vote toward the tally that decides the execution', () => {
-    const b = buildGame({ roles: ROLES, upTo: { kind: 'night', number: 1 } });
-    b.push('STATUS_APPLIED', {
-      playerId: 'p5',
-      status: 'master',
-      sourcePlayerId: 'p3',
-      effective: true,
-      expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
-    });
-    b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
-    b.push('NOMINATION_OPENED', { id: 'n1', nominatorId: 'p4', nomineeId: 'p1' });
+    const b = withButlerMaster('p5');
     // Three clean votes plus the Butler's invalid one clears the threshold of 4.
     vote(b, 'n1', ['p4', 'p6', 'p7', 'p3']);
     const result = resolveDayExecution(b.state);
