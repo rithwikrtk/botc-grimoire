@@ -1,4 +1,3 @@
-import { characterById } from '@/editions/troubleBrewing/characters';
 import type { ResolutionLink } from '../events';
 import { abilityFunctional } from '../selectors/predicates';
 import { playerById } from '../selectors/players';
@@ -57,9 +56,21 @@ function guards(view: RulesView, target: RulesViewPlayer): ResolutionLink | null
  *                                   already-dead, Monk and Soldier guards on it
  *   otherwise                    -> died
  *
- * `mayorBounceTargetId` is undefined when the caller has not been asked yet,
- * `null` when the Storyteller chose to let the Mayor die, and a player id to
- * bounce onto them.
+ * `mayorBounceTargetId` caller contract — three distinct values, one spelling
+ * each, deliberately not interchangeable:
+ *   - `undefined` — the Storyteller has not been asked yet. Returns
+ *     `needs_mayor_choice` with the legal `candidates`.
+ *   - `null` — the Storyteller was asked and chose to decline: no bounce, the
+ *     Mayor dies after all (their ability says another player *might* die
+ *     instead, so declining is legal, not an error).
+ *   - a `PlayerId` — bounce onto that player. It must not be the Mayor's own id
+ *     and must not be the attacker's id, or this throws (§16.7); it does NOT
+ *     also need to be alive at call time — the already-dead guard re-runs on it
+ *     below and reports that outcome rather than pre-empting it.
+ *
+ * A caller must never pass the Mayor's own id to mean "decline the bounce" —
+ * that is what `null` means, and only `null` means it. Two spellings for one
+ * intent would blur the resolutionChain's audit record.
  */
 export function resolveDemonKill(
   view: RulesView,
@@ -93,8 +104,7 @@ export function resolveDemonKill(
     };
   }
 
-  const isFunctionalMayor =
-    characterById(target.characterId).id === 'mayor' && abilityFunctional(view, target);
+  const isFunctionalMayor = target.characterId === 'mayor' && abilityFunctional(view, target);
 
   if (isFunctionalMayor) {
     if (mayorBounceTargetId === undefined) {

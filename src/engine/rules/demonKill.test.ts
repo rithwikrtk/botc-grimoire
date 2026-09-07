@@ -2,7 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildGame, type LogBuilder } from '@test/helpers/game';
 import { toRulesView } from '@/engine/selectors/rulesView';
 import { expiryFor } from '@/engine/phase';
-import { mayorBounceCandidates, resolveDemonKill } from './demonKill';
+import { killDerivation, mayorBounceCandidates, resolveDemonKill } from './demonKill';
 
 const ROLES: Array<[string, string]> = [
   ['p1', 'imp'],
@@ -57,6 +57,29 @@ describe('resolveDemonKill — order is the rule (§4.5)', () => {
     expect(outcome.resolutionChain).toEqual([{ targetId: 'p6', result: 'no_effect' }]);
   });
 
+  // The poisoned-Imp test above reaches `no_effect` via isPoisoned. This reaches
+  // the SAME outcome via the other half of abilityFunctional — requiresAlive —
+  // exercising a path the poisoned fixture cannot: a dead attacker.
+  it('does nothing when the Imp itself is dead (the requiresAlive route to no_effect)', () => {
+    const b = night();
+    b.push('DEATH', { playerId: 'p1', characterIdAtDeath: 'imp', cause: 'other' });
+    const outcome = resolve(b, 'p6');
+    expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: null, starpass: false });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p6', result: 'no_effect' }]);
+  });
+
+  // Order-pinning: already-dead is checked before Monk protection (§4.5). A dead
+  // AND protected target must report already_dead, not monk_protected. A guards()
+  // reordered to check protection first passes every other test in this file
+  // unchanged and only reddens here.
+  it('reports already_dead, not monk_protected, for a target that is both', () => {
+    const b = protect(night(), 'p6');
+    b.push('DEATH', { playerId: 'p6', characterIdAtDeath: 'chef', cause: 'demon' });
+    const outcome = resolve(b, 'p6');
+    expect(outcome).toMatchObject({ finalVictimId: null });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p6', result: 'already_dead' }]);
+  });
+
   it('does nothing when the target is already dead', () => {
     const b = night();
     b.push('DEATH', { playerId: 'p6', characterIdAtDeath: 'chef', cause: 'demon' });
@@ -86,6 +109,16 @@ describe('resolveDemonKill — order is the rule (§4.5)', () => {
   it('kills a poisoned Soldier', () => {
     const outcome = resolve(poison(night(), 'p4'), 'p4');
     expect(outcome).toMatchObject({ finalVictimId: 'p4' });
+  });
+
+  // Order-pinning: Monk protection is checked before the Soldier check (§4.5).
+  // A protected Soldier must report monk_protected, not soldier. A guards()
+  // reordered to Soldier-before-Monk passes every other test in this file
+  // unchanged and only reddens here.
+  it('reports monk_protected, not soldier, for a protected Soldier', () => {
+    const outcome = resolve(protect(night(), 'p4'), 'p4');
+    expect(outcome).toMatchObject({ finalVictimId: null });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p4', result: 'monk_protected' }]);
   });
 
   it('starpasses on a self-target', () => {
@@ -158,6 +191,21 @@ describe('resolveDemonKill — the Mayor bounce (§4.5, §16.7)', () => {
     expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: 'p5' });
   });
 
+  // Order-pinning: protection (and the other target-side guards) is checked
+  // BEFORE the Mayor branch — a protected Mayor is blocked outright and never
+  // reaches a bounce choice. Hoisting the Mayor check above guards() passes
+  // every other test in this file unchanged and only reddens here: it would
+  // return needs_mayor_choice instead, letting the Storyteller bounce a kill
+  // the Monk already stopped and kill an innocent player who should have
+  // survived the night. `kind` is asserted explicitly because that is the
+  // distinction that matters.
+  it('blocks a protected Mayor outright rather than asking for a bounce', () => {
+    const outcome = resolve(protect(night(), 'p5'), 'p5');
+    expect(outcome.kind).toBe('resolved');
+    expect(outcome).toMatchObject({ finalVictimId: null });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p5', result: 'monk_protected' }]);
+  });
+
   it('lets the Mayor die when the Storyteller declines to bounce', () => {
     const outcome = resolve(night(), 'p5', null);
     expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: 'p5' });
@@ -206,13 +254,6 @@ describe('resolveDemonKill — the Mayor bounce (§4.5, §16.7)', () => {
   it('rejects the Mayor as their own bounce target', () => {
     expect(() => resolve(night(), 'p5', 'p5')).toThrow(/not a legal bounce target/i);
   });
-
-  it('does not bounce twice when the bounce target is another Mayor-like case', () => {
-    // There is only one Mayor in Trouble Brewing, so a second bounce is
-    // unreachable. The chain must be at most two links regardless.
-    const outcome = resolve(night(), 'p5', 'p6');
-    expect(outcome.resolutionChain.length).toBeLessThanOrEqual(2);
-  });
 });
 
 describe('mayorBounceCandidates (§16.7)', () => {
@@ -223,5 +264,81 @@ describe('mayorBounceCandidates (§16.7)', () => {
     expect(candidates).not.toContain('p8');
     expect(candidates).not.toContain('p5');
     expect(candidates).not.toContain('p1');
+  });
+});
+
+describe('killDerivation (§8.2 — show your working)', () => {
+  // Player n's default fixture name is `Player n` (test/helpers/game.ts).
+  it('renders no_effect and "no one died tonight"', () => {
+    const b = poison(night(), 'p1');
+    const outcome = resolve(b, 'p6');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      "Player 6 chosen, but the Demon's ability is not working -> nothing happens",
+      'announce at dawn: no one died tonight',
+    ]);
+  });
+
+  it('renders already_dead', () => {
+    const b = night();
+    b.push('DEATH', { playerId: 'p6', characterIdAtDeath: 'chef', cause: 'demon' });
+    const outcome = resolve(b, 'p6');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      'Player 6 is already dead -> nothing happens',
+      'announce at dawn: no one died tonight',
+    ]);
+  });
+
+  it('renders monk_protected', () => {
+    const b = protect(night(), 'p6');
+    const outcome = resolve(b, 'p6');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      'Player 6 is protected by the Monk -> safe',
+      'announce at dawn: no one died tonight',
+    ]);
+  });
+
+  it('renders soldier', () => {
+    const b = night();
+    const outcome = resolve(b, 'p4');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      'Player 4 is the Soldier -> safe from the Demon',
+      'announce at dawn: no one died tonight',
+    ]);
+  });
+
+  it('renders starpass, and the victim in the announcement', () => {
+    const b = night();
+    const outcome = resolve(b, 'p1');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      'Player 1 killed themselves -> starpass',
+      'announce at dawn: Player 1 died',
+    ]);
+  });
+
+  it('renders died, and the victim in the announcement', () => {
+    const b = night();
+    const outcome = resolve(b, 'p6');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      'Player 6 dies',
+      'announce at dawn: Player 6 died',
+    ]);
+  });
+
+  it('renders mayor_bounce followed by the bounce victim dying', () => {
+    const b = night();
+    const outcome = resolve(b, 'p5', 'p6');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      'Player 5 is the Mayor -> the kill bounces',
+      'Player 6 dies',
+      'announce at dawn: Player 6 died',
+    ]);
+  });
+
+  it('renders needs_mayor_choice as its own single line', () => {
+    const b = night();
+    const outcome = resolve(b, 'p5');
+    expect(killDerivation(toRulesView(b.state), outcome)).toEqual([
+      'Player 5 is the Mayor — choose who dies instead, or nobody',
+    ]);
   });
 });
