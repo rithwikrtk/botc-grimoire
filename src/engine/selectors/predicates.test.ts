@@ -1,9 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildGame } from '@test/helpers/game';
+import { buildGame, LogBuilder } from '@test/helpers/game';
 import { toRulesView } from './rulesView';
 import { abilityFunctional, isDrunk } from './predicates';
 import { grimoireTokens, isPoisoned, isProtected } from './statuses';
-import { registrationOptionsForCharacterId } from '@/editions/troubleBrewing/registration';
 import type { RulesView, RulesViewPlayer } from '@/engine/types';
 
 const ROLES: Array<[string, string]> = [
@@ -126,6 +125,19 @@ describe('abilityFunctional (§4.2)', () => {
     expect(JSON.stringify(tokens)).not.toMatch(/effective/);
   });
 
+  // predicates.ts guards `characterId === ''` before calling characterById, which
+  // would otherwise throw for a player seated but not yet dealt a role (§5.1).
+  it('is false for a seated player with no role assigned yet', () => {
+    const b = new LogBuilder();
+    b.push('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: [{ id: 'p1', name: 'Player 1', seat: 0 }],
+    });
+    const v = view(b);
+    expect(player(v, 'p1').characterId).toBe('');
+    expect(abilityFunctional(v, player(v, 'p1'))).toBe(false);
+  });
+
   it('ignores a protection mark applied with effective: false', () => {
     const b = game();
     b.push('STATUS_APPLIED', {
@@ -140,8 +152,8 @@ describe('abilityFunctional (§4.2)', () => {
   });
 });
 
-describe('registration is not an ability (§4.2)', () => {
-  it('leaves a poisoned Recluse registering ambiguously', () => {
+describe('registration is not gated by abilityFunctional (§4.2)', () => {
+  it('a poisoned Recluse still has a non-functional ability', () => {
     const b = game();
     b.push('STATUS_APPLIED', {
       playerId: 'p7',
@@ -151,10 +163,17 @@ describe('registration is not an ability (§4.2)', () => {
       expiresAt: { kind: 'day', number: 1 },
     });
     const v = view(b);
-    // The Recluse's ability is not functional...
     expect(abilityFunctional(v, player(v, 'p7'))).toBe(false);
-    // ...but registration is a passive property and is unaffected.
-    expect(registrationOptionsForCharacterId('recluse')).toHaveLength(3);
+    // Registration itself is a passive property, not an ability, and is
+    // deliberately NOT re-asserted here: registrationOptionsForCharacterId takes
+    // only a characterId and never sees player/poison state, so any assertion on
+    // it here would pass identically regardless of this player's poison — it
+    // cannot detect a regression in this predicate. That invariant is enforced
+    // elsewhere, more strongly:
+    //   - src/editions/troubleBrewing/registration.test.ts:53-58 — the structural
+    //     arity test proving no state/phase/aliveness parameter exists to gate on.
+    //   - Task 8's `describe('a poisoned Recluse still registers ambiguously
+    //     (§4.2, §14 Tier 2)')` — the behavioural test against a real RulesView.
   });
 });
 
