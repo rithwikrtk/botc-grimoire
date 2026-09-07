@@ -2,7 +2,7 @@
 ## Design Document
 
 Date: 2026-09-07
-Status: draft v3 — revised after a second, five-lens adversarial review
+Status: draft v3.1 — five-lens review folded in, then self-reviewed
 Edition scope: **Trouble Brewing only**
 
 > v1 and v2 are kept as `.v1.md.bak` / `.v2.md.bak`. Change log: §17.
@@ -146,7 +146,7 @@ ROLE_CHANGED        { playerId, from, to,
 PHASE_ADVANCED      { phase: 'night'|'day', number }
 DAY_CLOSED          { }                       // executions derived, never stored
 
-NIGHT_STEP_RESOLVED { stepId, actorIds: [playerId], perceivedCharacterId,
+NIGHT_STEP_RESOLVED { stepId, actorIds: [playerId], perceivedCharacterId?,
                       targets: [playerId], chosenAnswer, answerClass,
                       answerReason?, registrationRulings: [{playerId, registersAs}],
                       abilityFunctional, effectSuppressed, stChoice? }
@@ -203,6 +203,8 @@ Notes on shapes that were wrong in v2:
 - `STATUS_APPLIED.effective` freezes whether the source's ability worked *at
   application time*, so a Grimoire token is placed even when suppressed (the
   physical Storyteller does place it) without lying about its effect.
+- `perceivedCharacterId` is present only on **per-actor** steps. Group steps (Minion
+  info, Demon info) have no single perceived character and omit it.
 
 ### 3.7 Derived state
 
@@ -211,7 +213,7 @@ players[]  { id, name, seat, characterId, perceivedCharacterId, alignment, alive
              statusLedger[], claims[], infoHistory[], deadVoteSpent,
              virginTriggered, slayerUsed, demonSince, demonNotified }
 phase          { kind, number }
-settledStepIds Set<string>          // `${stepId}:${actorKey}` — resolved ∪ skipped
+settledStepIds Set<string>          // `${night}:${stepId}:${actorKey}` — resolved ∪ skipped
 todaysExecutions [{playerId, characterIdAtDeath, kind}]
 nominations[]  ruleFlags[]  notes[]  distribution  edition
 victory        { status: 'ongoing'|'good'|'evil', reason }
@@ -220,7 +222,10 @@ victory        { status: 'ongoing'|'good'|'evil', reason }
 `poisoned` and friends are **selectors over `statusLedger`** comparing `expiresAt`
 to the current phase — not stored flags, and not a per-phase filtering pass.
 `settledStepIds` is a `Set<string>`: v2 typed it `Set<(stepId, actorId)>`, and a JS
-`Set` compares tuples by reference, so every lookup would have missed.
+`Set` compares tuples by reference, so every lookup would have missed. **The key is
+night-scoped.** Without the night prefix the set is derived from the whole event log,
+so on night 2 every step is already settled, `nextStep()` returns null immediately,
+and the night ends before it starts.
 
 ### 3.8 Edition boundary — honest version
 
@@ -340,6 +345,21 @@ defect signal: three overrides on the Empath step is a bug report from the field
 | `master` | night N | end of day N | Butler |
 | `redHerring` | setup | never | setup |
 
+**Phase ordering, stated explicitly because every lifetime above depends on it:**
+phases alternate `night 1 → day 1 → night 2 → day 2 → …`. Day N *follows* night N.
+
+```
+phaseOrdinal({kind, number}) = number * 2 + (kind === 'night' ? 0 : 1)
+isActive(status, now)        = phaseOrdinal(now) <= phaseOrdinal(status.expiresAt)
+```
+
+The comparison is **inclusive**: a status expiring "end of night N" is active
+throughout night N — the Monk's protection must survive until the Imp step later
+that same night — and is gone by day N. Poison applied night N is active for night N
+and day N, and gone at the start of night N+1. Left unstated, an implementer has a
+coin-flip between `<` and `<=`, and the wrong choice silently breaks the Monk or
+clears poison a day early.
+
 Declarative and time-driven, never actor-driven — a Poisoner executed on Day 3 must
 not leave their victim poisoned for the rest of the game. §6.3's "remove previous
 mark" entries are **physical table instructions**, not the mechanism.
@@ -357,8 +377,10 @@ resolveDemonKill(state, targetId):
   target is a functional Soldier    -> 'soldier'
   target is the attacker themself   -> starpass (§4.6)
   target is a functional Mayor      -> ST picks a bounce target (alive, not the
-                                       Mayor, not the attacker); re-run the three
-                                       guards above on the bounce target
+                                       Mayor, not the attacker); re-run the
+                                       already-dead, Monk and Soldier guards on
+                                       that bounce target (the attacker-functional
+                                       and self-target guards cannot apply)
   otherwise                         -> 'died'
 ```
 
@@ -374,12 +396,18 @@ the real Imp was alive: two living Imps.
 
 ```
 onDemonDeath(deadDemonId):
-  if starpass and a living Minion exists -> ST picks successor
-  else if Scarlet Woman alive && abilityFunctional && aliveCountAtDeath >= 5
-                                         -> Scarlet Woman becomes Imp
+  if Scarlet Woman alive && abilityFunctional && aliveCountAtDeath >= 5
+                                         -> Scarlet Woman becomes the Demon
+  else if starpass and a living Minion exists -> ST picks successor
   else                                   -> no successor
   emit DEMON_DIED, ROLE_CHANGED; set demonSince; checkVictory at commit
 ```
+
+The Scarlet Woman branch is checked **first**, including on a starpass: her ability
+is worded as an unconditional trigger — "if the Demon dies, you become the Demon" —
+not a Storyteller option, so when its condition is met it decides the successor
+rather than deferring to the starpass choice. v3's first draft had this reversed.
+§16.9 records it as contested and names the alternative.
 
 `aliveCountAtDeath` counts the dying Demon (§16.1).
 
@@ -448,6 +476,23 @@ Two classes, because they deserve different handling:
    can reach. Re-confirmed at each dusk with one tap: *Seating unchanged? [Yes] /
    [Someone moved]*.
 
+### 5.6 Roster changes mid-game
+
+`PLAYER_CHANGED` exists because late arrivals, departures and typos are real. Its
+semantics are specified here rather than left to the implementer, because seat
+adjacency feeds Chef and Empath.
+
+| `op` | Effect |
+|---|---|
+| `rename` | Cosmetic. Nothing else changes. |
+| `reseat` | The circle is rebuilt. Adjacency-derived answers already given become stale — flagged, never rewritten. |
+| `remove` | **The player leaves the circle; they are not marked dead.** Adjacency closes over the gap, `aliveCount` drops, and the execution threshold changes. This matches the table: an absent player is not a corpse sitting between two neighbours. To treat someone as dead instead, emit `DEATH { cause: 'other' }` and leave them seated. |
+| `add` | Requires an explicit character assignment. The public distribution is now inconsistent with the player count — flagged loudly, because guide §8 makes those counts public and the table will notice. |
+
+In every case, information already given from the old seating stands as spoken.
+`RULE_FLAGGED { class: 'integrity' }` records that downstream positional answers may
+no longer reconcile, and `checkVictory` runs — a removal can cross the 2-alive line.
+
 ---
 
 ## 6. Night engine
@@ -466,7 +511,9 @@ Re-evaluated after **every** step event. No materialised queue.
 
 - `settledStepIds` = resolved ∪ **skipped**. v2 counted only resolved, so tapping
   "skip" returned the same step forever — a hard stall, at night, live.
-- `stepKey` is a string: `` `${stepId}:${grouping === 'group' ? 'GROUP' : actorId}` ``.
+- `stepKey` is a string:
+  `` `${phase.number}:${stepId}:${grouping === 'group' ? 'GROUP' : actorId}` ``.
+  One key per actor for per-actor steps; one key for the whole set for group steps.
 - Passing over a step whose condition is unmet emits `NIGHT_STEP_SKIPPED { reason:
   'condition_unmet' }`, so the log can answer "why didn't the Undertaker wake?"
 - **The cursor is deliberately non-monotonic.** A mid-night Scarlet Woman promotion
@@ -487,9 +534,14 @@ Re-evaluated after **every** step event. No materialised queue.
   reminderTokens: { add: ['protected'], remove: [] },   // table instructions
   targets: { min, max, distinct?, warnSelf?, warnDead?, warnRepeat? },  // soft
   computeCandidates: (s, targets) => LegalAnswer[],     // pure, render-safe
-  effect: { status:'protected', lifetime:'until_dawn' },
-  requiresAlive?: boolean }
+  effect: { status:'protected', lifetime:'until_dawn' } }
 ```
+
+**`requiresAlive` lives on the character (§4.2), never on the step.** Waking and
+ability-functionality are different questions: `wakes()` decides who is roused — the
+Ravenkeeper's `wakes` deliberately does *not* filter on `alive` — while
+`abilityFunctional` decides whether what they are told is real. A step reads the flag
+from the actor's character; it is never duplicated onto the step.
 
 `computeCandidates` receives a narrowed `RulesView` (players, characters, statuses,
 phase, deaths) — **not** the full `GameState`, so the edition layer structurally
@@ -556,6 +608,15 @@ Townsfolk.
   including when poisoned**. The nomination then proceeds to a normal vote.
 - **Two executions in one day** is therefore possible; `todaysExecutions` is a list,
   and the Undertaker step becomes a Storyteller choice when it has more than one.
+- **Closing the day.** An explicit *Close day* action, always available, **including
+  with zero nominations** — the Mayor's win (§4.7 row 4) is only reachable through a
+  day that closed with no execution, so a day must be closeable with nobody
+  nominated. It emits `DAY_CLOSED`, resolves any execution from the day's
+  nominations, runs `checkVictory`, and advances to night.
+- **Ending the game early.** An *End game* action emits
+  `GAME_ENDED { reason: 'abandoned' }`, for the ordinary case where evil concedes or
+  people go home. Without it that reason has no producer and an abandoned game cannot
+  reach the post-game summary.
 - **Slayer.** Anyone may claim it. `SLAYER_CLAIMED` records whether the claimant is
   the real Slayer, whether their ability is functional, whether a Recluse target was
   ruled to register as the Demon, and — separately — whether the target **is** the
@@ -594,12 +655,14 @@ Every computed number renders its derivation beneath it:
 
 ```
 Empath — Bea:  1
-   Ali (dead, skipped) → Bea ← Cy
-   Ali GOOD · Cy EVIL
+   seats:  … Zed | Ali (dead) | Bea | Cy …
+   nearest alive either side, skipping the dead:  Zed · Cy
+   Zed GOOD · Cy EVIL                                    -> 1
 
-Chef:  2
-   ring: Dan* Eve* Fin* Gus Hal      (* = evil)
-   pairs: (Dan,Eve) (Eve,Fin)
+Chef:  2                                    (10 players, 3 evil)
+   ring: Dan* Eve* Fin* Gus Hal Ivy Jo Kat Lee Moe       (* = evil)
+   adjacent evil pairs: (Dan,Eve) (Eve,Fin)              -> 2
+   a run of k adjacent evils gives k-1 pairs; the ring wraps
 
 Threshold:  4        ceil(7 alive / 2)
 ```
@@ -629,6 +692,10 @@ can stay consistent about the Recluse — or knowingly not be.
 Seating, true characters, status markers, plus the red herring, the demon bluffs and
 the Drunk's believed-character marker (§16.2). Never: notes, claims, info history,
 lies, overrides, registration rulings, or the event log.
+
+**Tokens, never effectiveness.** Spy Mode shows that a `protected` marker sits on a
+player; it never exposes `STATUS_APPLIED.effective`. A physical reminder token does
+not announce that the Monk who placed it was poisoned, and neither does this.
 
 ### 10.2 Structural separation
 
@@ -688,6 +755,11 @@ adversary, and belongs in the pre-game checklist.
   `isPrimary === false`. Hold 300ms to restore.
 - **Blank on `visibilitychange` / `pagehide`,** synchronously, for all private views
   — the iOS app switcher screenshots whatever was last on screen.
+- **Precedence, because §10.3 hooks the same event with the opposite intent:** if
+  `mode === 'spy'`, Spy Mode wins and the page does **not** blank. The Spy is
+  supposed to be looking, and a blank they cannot clear would strand them — the
+  restore hold is 300ms while the Spy-exit hold is 2s on a different control. Spy
+  Mode is never a "private view" for blanking purposes; every other view blanks.
 - Alignment by glyph, never colour alone. Role text deliberately small; one row
   expanded at a time.
 
@@ -715,9 +787,14 @@ the table; it would blank mid-performance and fight the wake lock), and the
 3. **Write-verify, not try/catch.** Modern Safari private browsing returns a working
    `localStorage` that does *not* throw — it discards at session end. So v2's
    try/catch caught nothing and the "NOT SAVING" banner had no trigger. Instead:
-   write, read back, compare a checksum; and detect private mode with a
-   cross-session sentinel. Failure shows a persistent banner *with an action*:
+   write, read back, compare a checksum. Failure shows a persistent banner *with an
+   action*:
    "NOT SAVING — export now and keep this tab open."
+   **Do not try to detect private browsing with a cross-session sentinel** — a
+   missing sentinel is indistinguishable from a first run. Instead request
+   `navigator.storage.persist()` at setup; a `false` result means the browser may
+   evict this data, which private mode reliably reports, and warrants a softer
+   warning: this browser may not keep your game, so export at each dawn.
 4. **Version skew.** Store `schemaVersion` + `appVersion`/`buildHash`; show the build
    id in the UI. On load, if the build changed and `phase !== 'setup'`, warn plainly.
    **A refused load must never overwrite or delete the blob, and must always offer a
@@ -728,8 +805,11 @@ the table; it would blank mid-performance and fight the wake lock), and the
    die together in every failure that actually matters.)
 6. **Export and import, both in Slice 1.** v2 had export only, which makes it a
    souvenir: no way to reproduce a weird game, build a test from it, or move it to a
-   laptop after the phone dies. Export via `navigator.share` with `<a download>`
-   fallback; filenames non-descriptive, since notes name real people.
+   laptop after the phone dies. Export runs from a user gesture (`navigator.share`
+   requires one), with an `<a download>` fallback, and never navigates away;
+   filenames are non-descriptive, since notes name real people. **Import refuses
+   while a game is in progress**, offering to export or discard the current game
+   first, so a mistapped import cannot destroy a live session.
 7. **Second-tab guard** with a `localStorage` heartbeat and a lease, plus a prominent
    **"Take control on this tab"** button on the read-only banner — otherwise a tab
    discard plus a fresh open locks you out of your own game mid-night.
@@ -857,10 +937,12 @@ overrides / registration ledgers, post-game summary.
    protection and Soldier are re-checked on the bounce target.
 8. **Execution finality** — once a nomination is the unique highest and meets
    threshold, that player is executed; there is no legal skip at that point.
-9. **Starpass beats Scarlet Woman.** When the Imp self-kills at 5+ alive with a
-   living Scarlet Woman, both trigger and the starpass branch wins — you may hand the
-   Imp to any living Minion, not necessarily her. Contested; the alternative is that
-   her non-optional ability pre-empts the choice.
+9. **Scarlet Woman beats starpass.** When the Imp self-kills at 5+ alive with a
+   living, functional Scarlet Woman, both trigger and **she** becomes the Demon,
+   because her ability reads as an unconditional trigger rather than a Storyteller
+   option. Genuinely contested — the alternative is that the starpass lets you hand
+   the Imp to any living Minion. If your group plays it the other way it is a
+   two-line change in `onDemonDeath` (§4.6) plus its test.
 10. **Poisoned Virgin** still consumes the ability on the first nomination.
 11. **Monk-protected Imp targeting itself** does not starpass.
 12. **A Recluse may register as the Demon and die to the Slayer** — without
@@ -884,6 +966,19 @@ auto-blank, the redacted Grimoire, desktop breakpoints. **Added:** show-your-wor
 (§8.2), `st_override` (§4.3), offline/PWA (§12), import (§12.6), the screen inventory
 and Reference screen (§8.1), seating confirmation (§5.5), the guarded Spy handover
 (§10.3), and the known-edition-debt table (§3.8).
+
+**v3.1 fixes** (self-review of v3): `settledStepIds` had no night in its key, so
+night 2 would have ended immediately (§3.7, §6.1); status-expiry comparison semantics
+and the night-N-then-day-N phase ordering were never stated (§4.4); the Empath worked
+example in §8.2 contradicted itself and the Chef example used an illegal
+distribution; `PLAYER_CHANGED` had no semantics (§5.6); `requiresAlive` was defined
+on both the character and the step (§4.2, §6.2); "re-run the three guards" named five
+(§4.5); §10.3 and §11 hooked `visibilitychange` with opposite intents and no
+precedence (§11); no action closed the day or ended a game, leaving the Mayor win and
+`reason: 'abandoned'` unreachable (§7); private-mode detection by sentinel could not
+distinguish a first run (§12.3); Scarlet Woman vs starpass precedence reversed
+(§4.6, §16.9); plus import-during-game, Spy Mode effectiveness leakage, and the
+per-actor scope of `perceivedCharacterId`.
 
 **v2 fixed** (from a three-lens review): the Drunk never waking; no win-condition
 engine; the night queue built before mid-night conditions were knowable; "compute the
