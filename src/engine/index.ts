@@ -65,6 +65,7 @@ export { reduce, initialState } from './reducer/fold';
 
 export { createStore, type Store, type Tx, type TransactionResult } from './commands/store';
 export { assignRoles, beginFirstNight, createGame, renamePlayer } from './commands/setupCommands';
+export { addNote, changeRole, clearStatus, recordDeath } from './commands/correctionCommands';
 export {
   advanceToDay,
   autoSkipUnmetSteps,
