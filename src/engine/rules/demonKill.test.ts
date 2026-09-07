@@ -1,0 +1,227 @@
+import { describe, expect, it } from 'vitest';
+import { buildGame, type LogBuilder } from '@test/helpers/game';
+import { toRulesView } from '@/engine/selectors/rulesView';
+import { expiryFor } from '@/engine/phase';
+import { mayorBounceCandidates, resolveDemonKill } from './demonKill';
+
+const ROLES: Array<[string, string]> = [
+  ['p1', 'imp'],
+  ['p2', 'poisoner'],
+  ['p3', 'monk'],
+  ['p4', 'soldier'],
+  ['p5', 'mayor'],
+  ['p6', 'chef'],
+  ['p7', 'scarlet_woman'],
+  ['p8', 'empath'],
+  ['p9', 'butler'],
+];
+
+function night(n = 2): LogBuilder {
+  return buildGame({ roles: ROLES, upTo: { kind: 'night', number: n } });
+}
+
+function poison(b: LogBuilder, playerId: string, effective = true): LogBuilder {
+  return b.push('STATUS_APPLIED', {
+    playerId,
+    status: 'poisoned',
+    sourcePlayerId: 'p2',
+    effective,
+    expiresAt: expiryFor('tonight_and_tomorrow', b.state.phase),
+  });
+}
+
+function protect(b: LogBuilder, playerId: string, effective = true): LogBuilder {
+  return b.push('STATUS_APPLIED', {
+    playerId,
+    status: 'protected',
+    sourcePlayerId: 'p3',
+    effective,
+    expiresAt: expiryFor('until_dawn', b.state.phase),
+  });
+}
+
+function resolve(b: LogBuilder, targetId: string, bounce?: string | null) {
+  return resolveDemonKill(toRulesView(b.state), 'p1', targetId, bounce);
+}
+
+describe('resolveDemonKill — order is the rule (§4.5)', () => {
+  it('kills an ordinary target', () => {
+    const outcome = resolve(night(), 'p6');
+    expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: 'p6', starpass: false });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p6', result: 'died' }]);
+  });
+
+  it('does nothing when the Imp is poisoned', () => {
+    const outcome = resolve(poison(night(), 'p1'), 'p6');
+    expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: null, starpass: false });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p6', result: 'no_effect' }]);
+  });
+
+  it('does nothing when the target is already dead', () => {
+    const b = night();
+    b.push('DEATH', { playerId: 'p6', characterIdAtDeath: 'chef', cause: 'demon' });
+    const outcome = resolve(b, 'p6');
+    expect(outcome).toMatchObject({ finalVictimId: null });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p6', result: 'already_dead' }]);
+  });
+
+  it('is blocked by a functional Monk', () => {
+    const outcome = resolve(protect(night(), 'p6'), 'p6');
+    expect(outcome).toMatchObject({ finalVictimId: null });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p6', result: 'monk_protected' }]);
+  });
+
+  it('is NOT blocked by a poisoned Monk\'s protection', () => {
+    // A poisoned Monk still places the token, with effective: false (§3.6, §4.2).
+    const outcome = resolve(protect(night(), 'p6', false), 'p6');
+    expect(outcome).toMatchObject({ finalVictimId: 'p6' });
+  });
+
+  it('is blocked by a functional Soldier', () => {
+    const outcome = resolve(night(), 'p4');
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p4', result: 'soldier' }]);
+    expect(outcome).toMatchObject({ finalVictimId: null });
+  });
+
+  it('kills a poisoned Soldier', () => {
+    const outcome = resolve(poison(night(), 'p4'), 'p4');
+    expect(outcome).toMatchObject({ finalVictimId: 'p4' });
+  });
+
+  it('starpasses on a self-target', () => {
+    const outcome = resolve(night(), 'p1');
+    expect(outcome).toMatchObject({ finalVictimId: 'p1', starpass: true });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p1', result: 'starpass' }]);
+  });
+
+  // §16.11 — the guard order matters: protection is checked before self-target.
+  it('does NOT starpass when the Imp targeting itself is Monk-protected', () => {
+    const outcome = resolve(protect(night(), 'p1'), 'p1');
+    expect(outcome).toMatchObject({ finalVictimId: null, starpass: false });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p1', result: 'monk_protected' }]);
+  });
+
+  it('does not starpass when the poisoned Imp targets itself', () => {
+    const outcome = resolve(poison(night(), 'p1'), 'p1');
+    expect(outcome).toMatchObject({ finalVictimId: null, starpass: false });
+  });
+});
+
+describe('resolveDemonKill and the Drunk (§4.1 — the load-bearing invariant)', () => {
+  // §4.1 names this exact failure: "an implementer writes
+  // perceivedCharacterId(x) === 'soldier' in the kill resolver and a
+  // Drunk-believing-Soldier survives the Demon." The ESLint rule is the guard;
+  // this is the assertion that survives a lint bypass, and there was none.
+  function withDrunk(believes: string): LogBuilder {
+    return buildGame({
+      roles: [
+        ['p1', 'imp'], ['p2', 'poisoner'], ['p3', 'drunk'], ['p4', 'chef'],
+        ['p5', 'empath'], ['p6', 'monk'], ['p7', 'mayor'],
+      ],
+      drunkBelief: { playerId: 'p3', believesCharacterId: believes },
+      upTo: { kind: 'night', number: 2 },
+    });
+  }
+
+  it('kills a Drunk who believes they are the Soldier', () => {
+    const outcome = resolve(withDrunk('soldier'), 'p3');
+    expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: 'p3' });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p3', result: 'died' }]);
+  });
+
+  it('kills a Drunk who believes they are the Mayor, offering no bounce', () => {
+    const outcome = resolve(withDrunk('mayor'), 'p3');
+    expect(outcome.kind).toBe('resolved');
+    expect(outcome).toMatchObject({ finalVictimId: 'p3' });
+  });
+
+  it('still bounces off the REAL Mayor in the same game', () => {
+    const outcome = resolve(withDrunk('mayor'), 'p7');
+    expect(outcome.kind).toBe('needs_mayor_choice');
+  });
+});
+
+describe('resolveDemonKill — the Mayor bounce (§4.5, §16.7)', () => {
+  it('asks for a bounce target when a functional Mayor is hit', () => {
+    const outcome = resolve(night(), 'p5');
+    expect(outcome.kind).toBe('needs_mayor_choice');
+    if (outcome.kind !== 'needs_mayor_choice') throw new Error('wrong shape');
+    expect(outcome.mayorId).toBe('p5');
+    // Alive, not the Mayor, not the attacker (§16.7).
+    expect(outcome.candidates).not.toContain('p5');
+    expect(outcome.candidates).not.toContain('p1');
+    expect(outcome.candidates.sort()).toEqual(['p2', 'p3', 'p4', 'p6', 'p7', 'p8', 'p9']);
+  });
+
+  it('kills a poisoned Mayor outright with no choice', () => {
+    const outcome = resolve(poison(night(), 'p5'), 'p5');
+    expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: 'p5' });
+  });
+
+  it('lets the Mayor die when the Storyteller declines to bounce', () => {
+    const outcome = resolve(night(), 'p5', null);
+    expect(outcome).toMatchObject({ kind: 'resolved', finalVictimId: 'p5' });
+    expect(outcome.resolutionChain).toEqual([{ targetId: 'p5', result: 'died' }]);
+  });
+
+  it('kills the bounce target', () => {
+    const outcome = resolve(night(), 'p5', 'p6');
+    expect(outcome).toMatchObject({ finalVictimId: 'p6' });
+    expect(outcome.resolutionChain).toEqual([
+      { targetId: 'p5', result: 'mayor_bounce' },
+      { targetId: 'p6', result: 'died' },
+    ]);
+  });
+
+  // §4.5 — "re-run the already-dead, Monk and Soldier guards on that bounce target".
+  it('re-checks Monk protection on the bounce target', () => {
+    const outcome = resolve(protect(night(), 'p6'), 'p5', 'p6');
+    expect(outcome).toMatchObject({ finalVictimId: null });
+    expect(outcome.resolutionChain).toEqual([
+      { targetId: 'p5', result: 'mayor_bounce' },
+      { targetId: 'p6', result: 'monk_protected' },
+    ]);
+  });
+
+  it('re-checks Soldier on the bounce target', () => {
+    const outcome = resolve(night(), 'p5', 'p4');
+    expect(outcome).toMatchObject({ finalVictimId: null });
+    expect(outcome.resolutionChain.at(-1)).toEqual({ targetId: 'p4', result: 'soldier' });
+  });
+
+  it('re-checks already-dead on the bounce target', () => {
+    const b = night();
+    b.push('DEATH', { playerId: 'p6', characterIdAtDeath: 'chef', cause: 'demon' });
+    const outcome = resolve(b, 'p5', 'p6');
+    expect(outcome.resolutionChain.at(-1)).toEqual({ targetId: 'p6', result: 'already_dead' });
+  });
+
+  // §4.5 — the attacker-functional and self-target guards cannot apply on a bounce.
+  it('does not starpass when the bounce target is the attacker', () => {
+    // §16.7 excludes the attacker from the candidates, and the resolver enforces it
+    // rather than trusting the caller.
+    expect(() => resolve(night(), 'p5', 'p1')).toThrow(/not a legal bounce target/i);
+  });
+
+  it('rejects the Mayor as their own bounce target', () => {
+    expect(() => resolve(night(), 'p5', 'p5')).toThrow(/not a legal bounce target/i);
+  });
+
+  it('does not bounce twice when the bounce target is another Mayor-like case', () => {
+    // There is only one Mayor in Trouble Brewing, so a second bounce is
+    // unreachable. The chain must be at most two links regardless.
+    const outcome = resolve(night(), 'p5', 'p6');
+    expect(outcome.resolutionChain.length).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('mayorBounceCandidates (§16.7)', () => {
+  it('excludes the dead, the Mayor and the attacker', () => {
+    const b = night();
+    b.push('DEATH', { playerId: 'p8', characterIdAtDeath: 'empath', cause: 'demon' });
+    const candidates = mayorBounceCandidates(toRulesView(b.state), 'p1', 'p5');
+    expect(candidates).not.toContain('p8');
+    expect(candidates).not.toContain('p5');
+    expect(candidates).not.toContain('p1');
+  });
+});
