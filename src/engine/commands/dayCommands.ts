@@ -11,6 +11,7 @@ import {
   threshold,
   voteIssues,
 } from '../selectors/nominations';
+import { registrationInconsistency } from '../selectors/registrationLedger';
 import { toRulesView } from '../selectors/rulesView';
 import type { GameState, PlayerId, VictoryReason } from '../types';
 import type { Store, Tx, TransactionResult } from './store';
@@ -247,6 +248,14 @@ export function applyVirgin(
       reason: evaluation.reason,
       registrationRulings: evaluation.registrationRulings,
     });
+    // §16.6 — one of three producers (Task 16 fix round 1, FIX 6: this ledger
+    // was wired into resolveStep only, so a Virgin/Slayer ruling was recorded
+    // but never checked against a prior one). Reads pre-transaction state —
+    // see the note on the matching call in nightCommands.ts's resolveStep for
+    // why that, and not tx.view(), is the right read here.
+    for (const issue of registrationInconsistency(store.getState(), evaluation.registrationRulings)) {
+      tx.flag(issue.rule, issue.class, issue.detail);
+    }
     if (!evaluation.fired) return;
     // §16.5 — this is an execution, and it is possible for a vote execution to
     // follow it the same day, which is why todaysExecutions is a list.
@@ -298,6 +307,10 @@ export function claimSlayer(
     );
   }
 
+  const registrationRulings = evaluation.targetRegisteredAsDemon
+    ? [{ playerId: targetId, registersAs: { alignment: 'evil' as const, team: 'demon' as const } }]
+    : [];
+
   return store.transaction('a Slayer claim', (tx) => {
     tx.emit('SLAYER_CLAIMED', {
       claimantId,
@@ -307,10 +320,14 @@ export function claimSlayer(
       targetRegisteredAsDemon: evaluation.targetRegisteredAsDemon,
       abilityFunctional: evaluation.abilityFunctional,
       outcome: evaluation.outcome,
-      registrationRulings: evaluation.targetRegisteredAsDemon
-        ? [{ playerId: targetId, registersAs: { alignment: 'evil', team: 'demon' } }]
-        : [],
+      registrationRulings,
     });
+    // §16.6 — the same producer as applyVirgin above (FIX 6). The canonical
+    // case: ruling the Recluse a Demon here, after ruling them good on an
+    // earlier night, is exactly the contradiction this ledger exists to catch.
+    for (const issue of registrationInconsistency(store.getState(), registrationRulings)) {
+      tx.flag(issue.rule, issue.class, issue.detail);
+    }
     if (evaluation.outcome !== 'died') return;
 
     // Read the demon-death outcome BEFORE the DEATH lands (§16.1).

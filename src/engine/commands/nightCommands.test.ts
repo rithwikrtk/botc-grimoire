@@ -4,11 +4,13 @@ import { assignRoles, beginFirstNight, createGame } from './setupCommands';
 import {
   advanceToDay,
   autoSkipUnmetSteps,
+  candidatesForCurrentStep,
   resolveImpStep,
   resolveStep,
   skipStep,
 } from './nightCommands';
 import { nextStep } from '../selectors/nightCursor';
+import { MAX_PLAYERS, MIN_PLAYERS } from '@/editions/troubleBrewing/distribution';
 
 /**
  * 12 players, 7/2/2/1 — the legal chart (guide §2).
@@ -120,6 +122,44 @@ describe('setup commands (§5)', () => {
     expect(store.getState().players.every((p) => p.characterId === '')).toBe(true);
     expect(store.getState().demonBluffs).toBeNull();
   });
+
+  // Fix round 1, Minor 7 — three cheap setup guards that had no test.
+  it('refuses duplicate player ids (the worst failure shape: every find-by-id resolves to the first)', () => {
+    let tick = 1_700_000_000_000;
+    const store = createStore([], () => (tick += 1000));
+    expect(() =>
+      createGame(store, [
+        { id: 'p1', name: 'One' },
+        { id: 'p1', name: 'Also One' },
+        { id: 'p3', name: 'Three' },
+        { id: 'p4', name: 'Four' },
+        { id: 'p5', name: 'Five' },
+      ]),
+    ).toThrow(/unique/i);
+  });
+
+  it('refuses a player count outside the chart bounds (§5.1)', () => {
+    let tick = 1_700_000_000_000;
+    const store = createStore([], () => (tick += 1000));
+    const tooFew = Array.from({ length: MIN_PLAYERS - 1 }, (_, i) => ({
+      id: `p${i + 1}`,
+      name: `P${i + 1}`,
+    }));
+    expect(() => createGame(store, tooFew)).toThrow(/between/i);
+
+    const tooMany = Array.from({ length: MAX_PLAYERS + 1 }, (_, i) => ({
+      id: `p${i + 1}`,
+      name: `P${i + 1}`,
+    }));
+    expect(() => createGame(store, tooMany)).toThrow(/between/i);
+  });
+
+  it('beginFirstNight refuses before roles are locked in', () => {
+    let tick = 1_700_000_000_000;
+    const store = createStore([], () => (tick += 1000));
+    createGame(store, ROLES.map(([id], index) => ({ id, name: `P${index + 1}` })));
+    expect(() => beginFirstNight(store)).toThrow(/locked in/i);
+  });
 });
 
 describe('resolveStep (§4.8, §6.2)', () => {
@@ -191,6 +231,45 @@ describe('resolveStep (§4.8, §6.2)', () => {
     expect(store.getState().players.find((p) => p.id === 'p4')?.statusLedger).toHaveLength(1);
   });
 
+  // Fix round 1, FIX 4 — warnDead is flagged as `integrity`, whose class means
+  // "no derived state changes" (flagTargetIssues' own message). Before this fix
+  // the effect loop emitted `effective: functional` regardless of the target's
+  // aliveness, so a Monk "protecting" a corpse produced a live protection entry
+  // and isProtected() read true for a dead player — a real derived-state change
+  // under a flag that promised there wasn't one.
+  it('places an ineffective token and flags target_dead when the target is already dead (§4.8)', () => {
+    const store = seeded();
+    toNightTwo(store);
+    while (nextStep(store.getState())?.step.id !== 'imp') skipStep(store, 'st_skip');
+    resolveImpStep(store, { targetId: 'p6' }); // p6 (Chef) dies tonight.
+    while (nextStep(store.getState()) !== null) skipStep(store, 'st_skip');
+    advanceToDay(store);
+    store.transaction('to night 3', (tx) => {
+      tx.emit('DAY_CLOSED', {});
+      tx.emit('PHASE_ADVANCED', { phase: 'night', number: 3 });
+    });
+    while (nextStep(store.getState())?.step.id !== 'monk') skipStep(store, 'st_skip');
+    const result = resolveStep(store, {
+      targets: ['p6'],
+      chosenAnswer: 'P6 protected (already dead)',
+      answerClass: 'canonical',
+    });
+    expect(result.events.map((e) => e.type)).toEqual([
+      'NIGHT_STEP_RESOLVED',
+      'STATUS_APPLIED',
+      'RULE_FLAGGED',
+    ]);
+    expect(result.events.find((e) => e.type === 'RULE_FLAGGED')?.payload).toMatchObject({
+      rule: 'target_dead',
+      class: 'integrity',
+    });
+    // Redden by: `effective: functional` (dropping `&& targetAlive`) — a corpse
+    // would then carry `effective: true`.
+    expect(result.events.find((e) => e.type === 'STATUS_APPLIED')?.payload).toMatchObject({
+      effective: false,
+    });
+  });
+
   it('advances the cursor and can be undone as one unit', () => {
     const store = seeded();
     while (nextStep(store.getState())?.step.id !== 'poisoner') skipStep(store, 'st_skip');
@@ -238,6 +317,52 @@ describe('resolveStep (§4.8, §6.2)', () => {
   });
 });
 
+// Fix round 1, FIX 3 — before this, nothing in the repo executed the
+// resolver-backed branch of resolveAnswer/candidatesForCurrentStep: every
+// resolveStep call elsewhere in this file targets the Poisoner or the Monk,
+// both resolverId: null. The Empath (p7, resolverId: 'empath') is the
+// simplest resolver-backed step this roster has — no Recluse or Spy is in
+// play, so alignmentCombinations has only the empty combination and the
+// resolver returns exactly one canonical candidate.
+describe('candidatesForCurrentStep (§4.3, §8.2)', () => {
+  it('computes the real answer for a resolver-backed step and resolveStep accepts it by key', () => {
+    const store = seeded();
+    while (nextStep(store.getState())?.step.id !== 'empath') skipStep(store, 'st_skip');
+    const candidates = candidatesForCurrentStep(store);
+    // p7's seat neighbours (p6 chef, p8 butler) are both good, so the count is 0.
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]).toMatchObject({ key: 'empath', answerClass: 'canonical', value: 0 });
+    // Redden by: candidatesForCurrentStep returning [] (e.g. an unreachable
+    // resolver lookup) — candidates would be [] and the length assertion fails.
+    const result = resolveStep(store, { answerKey: 'empath', answerClass: 'canonical' });
+    expect(result.events.map((e) => e.type)).toEqual(['NIGHT_STEP_RESOLVED']);
+    // Redden by: resolveAnswer's computes branch returning resolution.chosenAnswer
+    // instead of chosen.display — chosenAnswer would be undefined, not '0'.
+    expect(result.events[0]?.payload).toMatchObject({ chosenAnswer: '0', answerClass: 'canonical' });
+  });
+
+  it('refuses an answerKey that is not among the computed candidates', () => {
+    const store = seeded();
+    while (nextStep(store.getState())?.step.id !== 'empath') skipStep(store, 'st_skip');
+    // Redden by: deleting the `if (!chosen) throw` guard in resolveAnswer.
+    expect(() =>
+      resolveStep(store, { answerKey: 'not-a-real-key', answerClass: 'canonical' }),
+    ).toThrow(/not one of the legal answers/i);
+  });
+
+  it("refuses an answerClass that does not match the computed answer's own class", () => {
+    const store = seeded();
+    while (nextStep(store.getState())?.step.id !== 'empath') skipStep(store, 'st_skip');
+    // 'empath' is a canonical answer here (no ambiguous neighbour); claiming it as
+    // a registration answer must be refused rather than silently accepted — this
+    // is the mechanism that stops answerClass being self-reported (§4.3).
+    // Redden by: deleting the `if (chosen.answerClass !== answerClass) throw` check.
+    expect(() =>
+      resolveStep(store, { answerKey: 'empath', answerClass: 'registration' }),
+    ).toThrow(/not registration/i);
+  });
+});
+
 describe('autoSkipUnmetSteps (§6.1)', () => {
   it('logs condition_unmet skips so the log can say why a step did not happen', () => {
     const store = seeded();
@@ -279,6 +404,35 @@ describe('resolveImpStep (§4.5, §4.6)', () => {
     const result = resolveImpStep(store, { targetId: 'p6' });
     expect(result.events.map((e) => e.type)).toEqual(['NIGHT_KILL_RESOLVED', 'DEATH']);
     expect(store.getState().players.find((p) => p.id === 'p6')?.alive).toBe(false);
+  });
+
+  // Fix round 1, FIX 5 — §4.8 applies at night as well as by day, and the Imp
+  // step's own targets (`{ min: 1, max: 1, warnDead: true }`, nightOrder.ts)
+  // carry the same warnDead constraint the Monk's does. Before this fix,
+  // resolveImpStep never called flagTargetIssues at all, so an Imp pointed at a
+  // dead player produced `already_dead` in the resolution chain but no
+  // RULE_FLAGGED — the identical mistake at the Monk step DOES flag. The
+  // derived state was already right (no second death); only the advisory
+  // record was missing.
+  it('flags target_dead when the Imp is pointed at an already-dead player (§4.8)', () => {
+    const store = seeded();
+    toImp(store);
+    resolveImpStep(store, { targetId: 'p6' }); // p6 (Chef) dies on night 2.
+    while (nextStep(store.getState()) !== null) skipStep(store, 'st_skip');
+    advanceToDay(store);
+    store.transaction('to night 3', (tx) => {
+      tx.emit('DAY_CLOSED', {});
+      tx.emit('PHASE_ADVANCED', { phase: 'night', number: 3 });
+    });
+    while (nextStep(store.getState())?.step.id !== 'imp') skipStep(store, 'st_skip');
+    const result = resolveImpStep(store, { targetId: 'p6' });
+    expect(result.events.map((e) => e.type)).toEqual(['NIGHT_KILL_RESOLVED', 'RULE_FLAGGED']);
+    expect(result.events.find((e) => e.type === 'RULE_FLAGGED')?.payload).toMatchObject({
+      rule: 'target_dead',
+      class: 'integrity',
+    });
+    // Redden by: deleting the `flagTargetIssues(tx, position, [opts.targetId])`
+    // call in resolveImpStep.
   });
 
   it('records a blocked kill with no death', () => {
@@ -351,22 +505,51 @@ describe('advanceToDay (§6.1)', () => {
   });
 });
 
+// Fix round 1, Minor 6 (upgraded) — a name list iterated with `in api` only
+// proves nothing was REMOVED that the list names; it cannot catch something
+// deleted from the barrel that the list never mentioned (renamePlayer, deal,
+// validateDeal, stepKey, reduce, toRulesView, checkVictory, onDemonDeath and
+// every seating/statuses/nominations selector were all missing from the old
+// list and could be deleted from src/engine/index.ts with this test still
+// green). Asserting the EXACT set of runtime keys fails in both directions.
+// Type-only exports do not appear at runtime (`Object.keys` on the resolved
+// module), which is fine — that is what `in api` was testing anyway.
+//
+// Tasks 17 and 18 both add exports to the barrel and MUST extend this list —
+// that maintenance cost is deliberate and budgeted (Fix round 1 review).
+const ENGINE_BARREL_RUNTIME_EXPORTS = [
+  'CHARACTERS', 'DISTRIBUTION', 'EDITION', 'FIRST_NIGHT', 'INFO_THRESHOLD_PLAYERS',
+  'MAX_PLAYERS', 'MIN_PLAYERS', 'OTHER_NIGHTS', 'RESOLVERS', 'SCARLET_WOMAN_BEATS_STARPASS',
+  'SCARLET_WOMAN_THRESHOLD', 'STEP_IDS', 'abilityFunctional', 'activeStatuses',
+  'advanceToDay', 'alignmentOf', 'alive', 'aliveCount', 'aliveNeighbours', 'applyVirgin',
+  'assignRoles', 'autoSkipUnmetSteps', 'beginFirstNight', 'beginNight', 'butlerViolations',
+  'bySeat', 'canRegisterAsTeam', 'candidatesForCurrentStep', 'castVote', 'characterById',
+  'charactersByTeam', 'checkVictory', 'chefDerivation', 'chefPairs', 'claimSlayer',
+  'closeDay', 'closeNomination', 'comparePhases', 'createGame', 'createStore', 'deal',
+  'demonDeathDerivation', 'distributionDerivation', 'distributionFor', 'empathCount',
+  'empathDerivation', 'endGame', 'evaluateSlayer', 'evaluateVirgin', 'expiryFor',
+  'grimoireTokens', 'initialState', 'isAmbiguous', 'isDrunk', 'isPoisoned', 'isProtected',
+  'isRedHerring', 'isStatusActive', 'killDerivation', 'livingPlayers', 'masterOf',
+  'mayorBounceCandidates', 'nextPhase', 'nextStep', 'nightOrderFor', 'nightOverview',
+  'nominate', 'nominationIssues', 'nominationsOnDay', 'onDemonDeath', 'phaseOrdinal',
+  'playerById', 'priorRulings', 'randomPicker', 'reduce', 'registrationInconsistency',
+  'registrationOptionsForCharacterId', 'renamePlayer', 'rerollOne', 'resolveDayExecution',
+  'resolveDemonKill', 'resolveImpStep', 'resolveStep', 'ringOrder', 'skipStep', 'stepKey',
+  'tallyFor', 'threshold', 'thresholdDerivation', 'toRulesView', 'todaysNominations',
+  'validateDeal', 'victoryDerivation', 'voteIssues', 'voteOrder',
+].sort();
+
 describe('the engine barrel (§8.1 — Plan 2 imports only this)', () => {
-  it('exports everything the UI needs', async () => {
+  it('exports exactly the runtime names Plan 2 is written against — no more, no less', async () => {
     const api = await import('@/engine');
-    for (const name of [
-      'createStore', 'createGame', 'assignRoles', 'beginFirstNight',
-      'nextStep', 'nightOverview', 'candidatesForCurrentStep', 'resolveStep',
-      'resolveImpStep', 'skipStep', 'autoSkipUnmetSteps', 'advanceToDay',
-      'nominate', 'castVote', 'closeNomination', 'closeDay', 'beginNight',
-      'applyVirgin', 'claimSlayer', 'endGame',
-      'characterById', 'charactersByTeam', 'distributionFor', 'nightOrderFor',
-      'RESOLVERS', 'CHARACTERS', 'EDITION', 'INFO_THRESHOLD_PLAYERS',
-      'chefDerivation', 'empathDerivation', 'thresholdDerivation',
-      'distributionDerivation', 'demonDeathDerivation', 'victoryDerivation',
-      'killDerivation', 'grimoireTokens',
-    ]) {
-      expect(name in api).toBe(true);
-    }
+    expect(Object.keys(api).sort()).toEqual(ENGINE_BARREL_RUNTIME_EXPORTS);
+  });
+
+  // §4.1 — the barrel must not launder the two restricted names through, even
+  // though every other name in players.ts is re-exported (Fix round 1, FIX 2).
+  it('does not export perceivedCharacterId or playersWithPerceivedCharacter', async () => {
+    const api = await import('@/engine');
+    expect('perceivedCharacterId' in api).toBe(false);
+    expect('playersWithPerceivedCharacter' in api).toBe(false);
   });
 });

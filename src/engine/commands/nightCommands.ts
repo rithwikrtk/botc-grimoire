@@ -122,7 +122,7 @@ export function resolveStep(store: Store, resolution: StepResolution): Transacti
   const functional =
     position.actor !== null ? abilityFunctional(view, position.actor) : position.actors.every((a) => abilityFunctional(view, a));
 
-  const answer = resolveAnswer(store, position, view, resolution, functional);
+  const answer = resolveAnswer(store, position, view, resolution);
 
   return store.transaction(`resolve the ${position.step.id} step`, (tx) => {
     tx.emit('NIGHT_STEP_RESOLVED', {
@@ -147,12 +147,20 @@ export function resolveStep(store: Store, resolution: StepResolution): Transacti
     const effect = position.step.effect;
     if (effect) {
       for (const targetId of targets) {
+        const targetAlive = view.players.find((p) => p.id === targetId)?.alive ?? false;
         tx.emit('STATUS_APPLIED', {
           playerId: targetId,
           status: effect.status,
           sourcePlayerId: position.actor?.id ?? null,
-          // A suppressed effect still places the token (§4.2).
-          effective: functional,
+          // A suppressed effect still places the token (§4.2) — the emission is
+          // unconditional. But a dead target is `warnDead`'s integrity case:
+          // "No derived state changes" (flagTargetIssues' own message below), so
+          // `effective` must be false there too, not just when the actor isn't
+          // functional. Without `&& targetAlive`, a Monk "protecting" an already-
+          // dead player produced `effective: true`, and isProtected() on a corpse
+          // read true — a real derived-state change under a flag that promised
+          // there wasn't one.
+          effective: functional && targetAlive,
           expiresAt: expiryFor(effect.lifetime, store.getState().phase),
         });
       }
@@ -163,6 +171,18 @@ export function resolveStep(store: Store, resolution: StepResolution): Transacti
     // §16.6 — registration consistency is flagged, never blocked. Ruling the
     // Recluse a Minion on night 1 and good on night 2 is legal and sometimes
     // deliberate; the app's job is to notice out loud.
+    //
+    // Minor 5 — why this reads store.getState() (pre-transaction) while
+    // flagTargetIssues above reads tx.view(): flagTargetIssues asks a question
+    // about NOW, inside this transaction — is the target alive AT THIS POINT,
+    // which could depend on an earlier event this same transaction just staged
+    // (it never does today, but the question is transaction-local by nature).
+    // registrationInconsistency asks a question about HISTORY — does this
+    // ruling contradict one made in a PRIOR transaction — and that check must
+    // never compare a ruling against itself. Reading tx.view() here would risk
+    // exactly that the moment any future step staged its own ruling earlier in
+    // the same transaction before this loop ran; reading the state from before
+    // this transaction opened rules that out structurally, not by convention.
     for (const issue of registrationInconsistency(store.getState(), answer.registrationRulings)) {
       tx.flag(issue.rule, issue.class, issue.detail);
     }
@@ -183,7 +203,6 @@ function resolveAnswer(
   position: CursorPosition,
   view: RulesView,
   resolution: StepResolution,
-  functional: boolean,
 ): { chosenAnswer: string; registrationRulings: RegistrationRuling[] } {
   const { answerClass } = resolution;
 
@@ -240,6 +259,20 @@ function resolveAnswer(
         `${resolution.answerKey} is a ${chosen.answerClass} answer, not ${answerClass} (§4.3)`,
       );
     }
+    // Minor 3 (fix round 1) — the SAME §4.3 constraint the `!computes` branch
+    // above enforces, on the other route. Every RESOLVERS answer's own
+    // answerClass is already derived from `rulings.length > 0` (resolvers.ts'
+    // `answer()` helper), so this is currently unreachable through any
+    // resolver this edition ships — it is a defence against a future or
+    // malformed resolver returning an inconsistent LegalAnswer, not a case any
+    // test can reach today. Kept anyway: §4.3 is stated once and should be
+    // checked at both places it applies, not enforced by an incidental
+    // correlation in a different module.
+    if (answerClass === 'registration' && chosen.registrationRulings.length === 0) {
+      throw new Error(
+        `${resolution.answerKey} is a registration answer but carries no registrationRulings (§4.3)`,
+      );
+    }
     // A ruled "1 of these 2 is X" answer leaves the shown token to the Storyteller
     // (Task 8), so the record is incomplete without it.
     const value = chosen.value;
@@ -256,7 +289,6 @@ function resolveAnswer(
   if (!resolution.chosenAnswer) {
     throw new Error(`A ${answerClass} answer needs a chosenAnswer`);
   }
-  void functional;
   return {
     chosenAnswer: resolution.chosenAnswer,
     registrationRulings: resolution.registrationRulings ?? [],
@@ -345,6 +377,13 @@ export function resolveImpStep(store: Store, opts: ImpStepOptions): TransactionR
       successorId: demonDeath?.kind === 'resolved' ? demonDeath.successorId : null,
     });
 
+    // §4.8 applies at night as well as by day (FIX 5, review round 1). Scoped to
+    // the CHOSEN target only, not any Mayor bounce target: Task 11 already ruled
+    // that a dead bounce target falls through to demonKill.ts's `already_dead`
+    // guard and is recorded there, and `mayorBounceCandidates` filters on
+    // `alive`, so the offered candidate list never contains one anyway.
+    flagTargetIssues(tx, position, [opts.targetId]);
+
     if (!victim) return;
 
     tx.emit('DEATH', {
@@ -361,7 +400,12 @@ export function resolveImpStep(store: Store, opts: ImpStepOptions): TransactionR
         successorReason: demonDeath.successorReason,
       });
       if (demonDeath.successorId) {
-        const successor = tx.view().players.find((p) => p.id === demonDeath.successorId)!;
+        const successor = tx.view().players.find((p) => p.id === demonDeath.successorId);
+        if (!successor) {
+          throw new Error(
+            `onDemonDeath named ${demonDeath.successorId} as the successor, but no such player exists`,
+          );
+        }
         tx.emit('ROLE_CHANGED', {
           playerId: successor.id,
           from: successor.characterId,

@@ -43,7 +43,71 @@ function seeded(): Store {
   return store;
 }
 
+// Fix round 1, FIX 6 — a separate, minimal 5-player game (chart 3/0/1/1),
+// because this file's main roster (R1, copied verbatim from Task 15) has no
+// Spy — and the Spy is the ONLY Trouble Brewing character who can ever be
+// ruled a Townsfolk nominator: canRegisterAsTeam(id, 'townsfolk') is true only
+// for the Spy's registration list; the Recluse's never includes townsfolk.
+// Without a Spy in play, evaluateVirgin's `canRuleAsTownsfolk` is false for
+// every possible nominator, so evaluateVirgin can NEVER produce a non-empty
+// registrationRulings on the main roster — a test asserting the §16.6 flag
+// fires there could not reach the case it claims to test, whatever it asserted.
+function seededWithSpyNominator(): Store {
+  const roles: Array<[string, string]> = [
+    ['p1', 'imp'],
+    ['p2', 'spy'],
+    ['p3', 'virgin'],
+    ['p4', 'chef'],
+    ['p5', 'soldier'],
+  ];
+  let tick = 1_700_000_000_000;
+  const store = createStore([], () => (tick += 1000));
+  createGame(store, roles.map(([id], index) => ({ id, name: `P${index + 1}` })));
+  assignRoles(store, {
+    assignments: Object.fromEntries(roles),
+    distribution: { townsfolk: 3, outsider: 0, minion: 1, demon: 1 },
+    setupModifiers: [],
+    demonBluffs: null,
+    drunkBelief: null,
+    redHerring: null,
+  });
+  beginFirstNight(store);
+  // Seed a prior ruling: p2 (the Spy) was ruled to register as a Minion — its
+  // true team — on an earlier information step. Emitted directly (rather than
+  // through a resolver) because the point under test is registrationInconsistency's
+  // wiring into applyVirgin, not which resolver could have produced the prior
+  // ruling.
+  store.transaction('seed a prior ruling on the Spy', (tx) => {
+    tx.emit('NIGHT_STEP_RESOLVED', {
+      stepId: 'investigator',
+      actorIds: ['p4'],
+      targets: [],
+      chosenAnswer: 'P2 registers as a Minion',
+      answerClass: 'registration',
+      registrationRulings: [{ playerId: 'p2', registersAs: { alignment: 'evil', team: 'minion' } }],
+      abilityFunctional: true,
+      effectSuppressed: false,
+    });
+  });
+  store.transaction('to day 1', (tx) => tx.emit('PHASE_ADVANCED', { phase: 'day', number: 1 }));
+  return store;
+}
+
 describe('applyVirgin (§7, §16.5, §16.10)', () => {
+  // A ruling flagged as inconsistent needs a PRIOR ruling about the same
+  // player with a different team already in registrationHistory — a test that
+  // makes only the new ruling could pass whether or not the check exists.
+  it('flags an inconsistent registration ruling when the Spy nominator is ruled a Townsfolk (§16.6)', () => {
+    const store = seededWithSpyNominator();
+    nominate(store, 'p2', 'p3');
+    const result = applyVirgin(store, 'p2', 'p3', { ruleNominatorAsTownsfolk: true });
+    expect(result.events.map((e) => e.type)).toContain('RULE_FLAGGED');
+    expect(
+      store.getState().ruleFlags.filter((f) => f.rule === 'registration_inconsistent'),
+    ).toHaveLength(1);
+    expect(store.getState().registrationHistory).toHaveLength(2);
+  });
+
   it('executes the nominator and records the Virgin as spent', () => {
     const store = seeded();
     nominate(store, 'p7', 'p4');
@@ -127,6 +191,45 @@ describe('claimSlayer (§7, §16.12)', () => {
       targetRegisteredAsDemon: true,
       registrationRulings: [{ playerId: 'p6', registersAs: { alignment: 'evil', team: 'demon' } }],
     });
+  });
+
+  // Fix round 1, FIX 6 — §16.6 was wired into resolveStep only, so a Slayer
+  // ruling was recorded but never checked against a prior one on the same
+  // player. The canonical case (per the review): ruling the Recluse a Demon
+  // here, after an earlier ruling registered them as good, is exactly the
+  // contradiction this ledger exists to surface.
+  //
+  // The prior ruling is seeded directly via a raw NIGHT_STEP_RESOLVED
+  // transaction rather than through a resolver, because dayAbilities.test.ts
+  // does not import nightCommands.ts and this file's seeded() already skips
+  // straight from night 1 to day 1 without resolving any step — the point
+  // under test is registrationInconsistency's wiring into claimSlayer, not
+  // which resolver could have produced the prior ruling. A ruling this
+  // specific (team differs from the new one) can only pass if BOTH the prior
+  // ruling actually lands in registrationHistory AND the new one is checked
+  // against it — a test with only the new ruling could pass whether or not
+  // that check exists at all.
+  it('flags an inconsistent registration ruling against a previously-ruled player (§16.6)', () => {
+    const store = seeded();
+    store.transaction('seed a prior ruling on the Recluse', (tx) => {
+      tx.emit('NIGHT_STEP_RESOLVED', {
+        stepId: 'investigator',
+        actorIds: ['p8'],
+        targets: [],
+        chosenAnswer: 'P6 registers as a good Outsider',
+        answerClass: 'registration',
+        registrationRulings: [{ playerId: 'p6', registersAs: { alignment: 'good', team: 'outsider' } }],
+        abilityFunctional: true,
+        effectSuppressed: false,
+      });
+    });
+    const result = claimSlayer(store, 'p5', 'p6', { ruleTargetAsDemon: true });
+    expect(result.events.map((e) => e.type)).toContain('RULE_FLAGGED');
+    expect(
+      store.getState().ruleFlags.filter((f) => f.rule === 'registration_inconsistent'),
+    ).toHaveLength(1);
+    // Recorded, not blocked: both rulings still landed in the ledger.
+    expect(store.getState().registrationHistory).toHaveLength(2);
   });
 
   it('records a bluffed claim with no death', () => {

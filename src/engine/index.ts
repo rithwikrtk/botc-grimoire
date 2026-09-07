@@ -106,15 +106,19 @@ export {
 export { priorRulings, registrationInconsistency } from './selectors/registrationLedger';
 export { toRulesView } from './selectors/rulesView';
 export { abilityFunctional, isDrunk } from './selectors/predicates';
-export {
-  alive,
-  aliveCount,
-  bySeat,
-  livingPlayers,
-  perceivedCharacterId,
-  playerById,
-  playersWithPerceivedCharacter,
-} from './selectors/players';
+// §4.1 — perceivedCharacterId and playersWithPerceivedCharacter are DELIBERATELY
+// NOT re-exported here, even though every other name in players.ts is. The
+// barrel is Plan 2's single import surface, but the restriction on these two
+// names is a boundary, not a convenience — a barrel that laundered them through
+// would let any file reach a Drunk's or a Spy's perceived identity via '@/engine'
+// while the ESLint rule still believed it had closed the two sanctioned readers
+// (nightCursor.ts and this barrel's own re-export list). Removing the names
+// turns a lint question into a compile error: there is no import specifier left
+// that resolves to them, so there is nothing for the rule's `group` patterns to
+// miss. Plan 2's UI reaches them, correctly, via '@/engine/selectors/players'
+// directly — that file is the other sanctioned reader (src/ui/** is exempt).
+// Do NOT add these two names back here.
+export { alive, aliveCount, bySeat, livingPlayers, playerById } from './selectors/players';
 export {
   activeStatuses,
   grimoireTokens,

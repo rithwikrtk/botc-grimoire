@@ -1,7 +1,7 @@
 import { alignmentOf, characterById } from '@/editions/troubleBrewing/characters';
 import type { EventOfType, GameEvent } from '../events';
 import { comparePhases } from '../phase';
-import type { GameState, Nomination, Phase, Player, PlayerId } from '../types';
+import type { GameState, Nomination, Phase, Player, PlayerId, RegistrationRuling } from '../types';
 
 // statusLedger, claims and infoHistory are NOT here: each player needs its own
 // array instance, so those three are re-declared per player after this spread
@@ -103,6 +103,20 @@ export const SINGLE_KEY_STEP_IDS: ReadonlySet<string> = new Set([
  * constant to its agreement-test coverage.
  */
 export const SCARLET_WOMAN_NOTIFY_STEP_ID = 'scarlet_woman_notify';
+
+/**
+ * §16.6's ledger append, factored out because three cases need it and each must
+ * preserve §3.5: a no-op append must hand back the SAME state object, not a
+ * fresh one carrying an unchanged registrationHistory reference. `{ ...next,
+ * registrationHistory }` unconditionally allocates a new top-level object even
+ * when `rulings` is empty, which breaks identity for SLAYER_CLAIMED on a
+ * bluffed claim and for VIRGIN_TRIGGERED's already-triggered case — both
+ * previously returned `state` itself.
+ */
+function withRulings(next: GameState, rulings: RegistrationRuling[]): GameState {
+  if (rulings.length === 0) return next;
+  return { ...next, registrationHistory: [...next.registrationHistory, rulings] };
+}
 
 function withSettled(state: GameState, keys: readonly string[]): GameState {
   const next = new Set(state.settledStepIds);
@@ -291,11 +305,7 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
           demonNotified: stepId === SCARLET_WOMAN_NOTIFY_STEP_ID ? true : p.demonNotified,
         }));
       }
-      const registrationHistory =
-        event.payload.registrationRulings.length > 0
-          ? [...next.registrationHistory, event.payload.registrationRulings]
-          : next.registrationHistory;
-      return { ...next, registrationHistory };
+      return withRulings(next, event.payload.registrationRulings);
     }
 
     case 'NIGHT_STEP_SKIPPED':
@@ -402,11 +412,7 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
       const next = mapPlayer(state, event.payload.nomineeId, (p) =>
         p.virginTriggered ? p : { ...p, virginTriggered: true },
       );
-      const registrationHistory =
-        event.payload.registrationRulings.length > 0
-          ? [...next.registrationHistory, event.payload.registrationRulings]
-          : next.registrationHistory;
-      return { ...next, registrationHistory };
+      return withRulings(next, event.payload.registrationRulings);
     }
 
     case 'SLAYER_CLAIMED': {
@@ -417,11 +423,7 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
             p.slayerUsed ? p : { ...p, slayerUsed: true },
           )
         : state;
-      const registrationHistory =
-        event.payload.registrationRulings.length > 0
-          ? [...next.registrationHistory, event.payload.registrationRulings]
-          : next.registrationHistory;
-      return { ...next, registrationHistory };
+      return withRulings(next, event.payload.registrationRulings);
     }
 
     case 'RULE_FLAGGED':

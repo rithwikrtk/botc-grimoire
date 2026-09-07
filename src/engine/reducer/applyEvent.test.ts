@@ -281,6 +281,55 @@ describe('applyEvent — referential stability (§3.5)', () => {
     expect(after).toBe(before);
   });
 
+  // Task 16 fix round 1, FIX 1 — the registrationHistory append must not break
+  // this for the other two producers. A bluffed Slayer claim changes nothing
+  // (claimantIsRealSlayer: false skips the slayerUsed write) and carries no
+  // registrationRulings, so this must be the SAME object, not merely an
+  // equal one — `{ ...next, registrationHistory }` spread unconditionally
+  // would allocate a fresh top-level object here even though nothing changed.
+  it('returns the identical state object for a bluffed Slayer claim (§3.5, §16.6 ledger)', () => {
+    const before = reduce(fivePlayerLog());
+    const after = applyEvent(
+      before,
+      evt('SLAYER_CLAIMED', {
+        claimantId: 'p3',
+        targetId: 'p1',
+        claimantIsRealSlayer: false,
+        targetIsTrueDemon: true,
+        targetRegisteredAsDemon: false,
+        abilityFunctional: false,
+        outcome: 'nothing',
+        registrationRulings: [],
+      }),
+    );
+    expect(after).toBe(before);
+  });
+
+  // Same defect, the VIRGIN_TRIGGERED producer: the Virgin has already been
+  // triggered once, so this event changes nothing.
+  it('returns the identical state object for a repeat VIRGIN_TRIGGERED (§3.5, §16.6 ledger)', () => {
+    const log = [
+      ...fivePlayerLog(),
+      evt('VIRGIN_TRIGGERED', {
+        nominatorId: 'p2',
+        nomineeId: 'p4',
+        fired: false,
+        registrationRulings: [],
+      }),
+    ];
+    const before = reduce(log);
+    const after = applyEvent(
+      before,
+      evt('VIRGIN_TRIGGERED', {
+        nominatorId: 'p5',
+        nomineeId: 'p4',
+        fired: false,
+        registrationRulings: [],
+      }),
+    );
+    expect(after).toBe(before);
+  });
+
   // The common night -> day transition after a no-execution day must not
   // allocate a fresh empty array: an already-empty todaysExecutions is an
   // unchanged sub-object.
