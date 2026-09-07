@@ -1,5 +1,7 @@
 import { characterById } from '@/editions/troubleBrewing/characters';
 import { onDemonDeath } from '../rules/demonDeath';
+import { evaluateSlayer } from '../rules/slayer';
+import { evaluateVirgin } from '../rules/virgin';
 import {
   butlerViolations,
   type FlagDraft,
@@ -203,5 +205,104 @@ export function endGame(
 ): TransactionResult {
   return store.transaction('end the game', (tx) => {
     tx.emit('GAME_ENDED', { winner, reason });
+  });
+}
+
+/**
+ * Records the Virgin trigger and, when it fired, executes the nominator. Called
+ * right after `nominate`, in its own transaction, so undoing the execution does
+ * not undo the nomination — they are two things that happened at the table.
+ */
+export function applyVirgin(
+  store: Store,
+  nominatorId: PlayerId,
+  nomineeId: PlayerId,
+  opts: { ruleNominatorAsTownsfolk?: boolean } = {},
+): TransactionResult {
+  const view = toRulesView(store.getState());
+  const evaluation = evaluateVirgin(view, nominatorId, nomineeId, opts);
+  if (!evaluation.isVirginNomination || !evaluation.consumed) {
+    throw new Error('applyVirgin called for a nomination that does not trigger the Virgin');
+  }
+  const nominator = view.players.find((p) => p.id === nominatorId)!;
+
+  return store.transaction('the Virgin is nominated', (tx) => {
+    tx.emit('VIRGIN_TRIGGERED', {
+      nominatorId,
+      nomineeId,
+      fired: evaluation.fired,
+      reason: evaluation.reason,
+      registrationRulings: evaluation.registrationRulings,
+    });
+    if (!evaluation.fired) return;
+    // §16.5 — this is an execution, and it is possible for a vote execution to
+    // follow it the same day, which is why todaysExecutions is a list.
+    tx.emit('EXECUTION', { playerId: nominatorId, kind: 'virgin' });
+    tx.emit('DEATH', {
+      playerId: nominatorId,
+      characterIdAtDeath: nominator.characterId,
+      cause: 'execution',
+      executionKind: 'virgin',
+    });
+  });
+}
+
+export function claimSlayer(
+  store: Store,
+  claimantId: PlayerId,
+  targetId: PlayerId,
+  opts: { ruleTargetAsDemon?: boolean } = {},
+): TransactionResult {
+  const view = toRulesView(store.getState());
+  const evaluation = evaluateSlayer(view, claimantId, targetId, opts);
+  const target = view.players.find((p) => p.id === targetId)!;
+
+  return store.transaction('a Slayer claim', (tx) => {
+    tx.emit('SLAYER_CLAIMED', {
+      claimantId,
+      targetId,
+      claimantIsRealSlayer: evaluation.claimantIsRealSlayer,
+      targetIsTrueDemon: evaluation.targetIsTrueDemon,
+      targetRegisteredAsDemon: evaluation.targetRegisteredAsDemon,
+      abilityFunctional: evaluation.abilityFunctional,
+      outcome: evaluation.outcome,
+      registrationRulings: evaluation.targetRegisteredAsDemon
+        ? [{ playerId: targetId, registersAs: { alignment: 'evil', team: 'demon' } }]
+        : [],
+    });
+    if (evaluation.outcome !== 'died') return;
+
+    // Read the demon-death outcome BEFORE the DEATH lands (§16.1).
+    const demonDeath = evaluation.routesToDemonDeath
+      ? onDemonDeath(tx.view(), targetId, { starpass: false, chosenSuccessorId: null })
+      : null;
+
+    tx.emit('DEATH', {
+      playerId: targetId,
+      characterIdAtDeath: target.characterId,
+      cause: 'slayer',
+    });
+
+    if (demonDeath && demonDeath.kind === 'resolved') {
+      tx.emit('DEMON_DIED', {
+        deadDemonId: targetId,
+        aliveCountAtDeath: demonDeath.aliveCountAtDeath,
+        successorId: demonDeath.successorId,
+        successorReason: demonDeath.successorReason,
+      });
+      if (demonDeath.successorId) {
+        const successor = tx.view().players.find((p) => p.id === demonDeath.successorId)!;
+        tx.emit('ROLE_CHANGED', {
+          playerId: successor.id,
+          from: successor.characterId,
+          to: target.characterId,
+          // This is a type narrowing, not a reachable branch: successorReason's
+          // type is 'scarlet_woman' | 'starpass' | null and TypeScript cannot see
+          // that a successor always carries a reason (Task 14 repeats this
+          // identical idiom at its own call site).
+          reason: demonDeath.successorReason === 'starpass' ? 'starpass' : 'scarlet_woman',
+        });
+      }
+    }
   });
 }
