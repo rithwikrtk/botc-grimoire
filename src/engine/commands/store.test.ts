@@ -1,6 +1,9 @@
 import { describe, expect, it, vi } from 'vitest';
 import { createStore } from './store';
+import type { Tx } from './store';
 import { reduce } from '@/engine/reducer/fold';
+import * as foldModule from '@/engine/reducer/fold';
+import * as victoryModule from '@/engine/selectors/victory';
 import type { GameEvent } from '@/engine/events';
 
 /** 7 players: 5/0/1/1 is the chart, so one Minion — but the fixtures below
@@ -124,6 +127,113 @@ describe('transactions (§3.2)', () => {
     });
     expect(store.getState()).toEqual(reduce(store.getEvents()));
   });
+
+  it('flags a rule break in the same transaction as the action, without aborting it (§4.8)', () => {
+    const store = seeded();
+    const result = store.transaction('storyteller overrides a ruling', (tx) => {
+      tx.emit('NOTE_ADDED', { id: 'n', scope: 'game', text: 'st correction' });
+      tx.flag('vote-count', 'integrity', 'recounted after the fact');
+    });
+    // Same txId across the action event and the flag — advisory enforcement
+    // never blocks, so `flag` must not abort or split off from the action.
+    expect(result.events).toHaveLength(2);
+    expect(new Set(result.events.map((e) => e.txId)).size).toBe(1);
+    const flagged = result.events.find((e) => e.type === 'RULE_FLAGGED');
+    expect(flagged?.payload).toMatchObject({
+      rule: 'vote-count',
+      class: 'integrity',
+      detail: 'recounted after the fact',
+    });
+    expect(store.getState().ruleFlags).toHaveLength(1);
+  });
+
+  it('view() narrows to a RulesView reflecting only what has been staged so far', () => {
+    const store = seeded();
+    store.transaction('check the view mid-transaction', (tx) => {
+      expect(tx.view().players.find((p) => p.id === 'p4')?.alive).toBe(true);
+      tx.emit('DEATH', { playerId: 'p4', characterIdAtDeath: 'chef', cause: 'demon' });
+      expect(tx.view().players.find((p) => p.id === 'p4')?.alive).toBe(false);
+      // §10.2 — RulesView must not expose stPrivate, notes or ruleFlags.
+      expect((tx.view() as unknown as Record<string, unknown>).stPrivate).toBeUndefined();
+    });
+  });
+
+  it('throws on a re-entrant transaction call rather than corrupting the log (§3.2)', () => {
+    const store = seeded();
+    const before = store.getEvents().length;
+    expect(() =>
+      store.transaction('outer action', (tx) => {
+        tx.emit('NOTE_ADDED', { id: 'n1', scope: 'game', text: 'outer' });
+        // §3.2 makes one Storyteller action one transaction — nesting is not a
+        // second transaction, it is undefined, and must be refused rather than
+        // silently discarding this inner commit's state change or reissuing a
+        // txId the inner transaction already used.
+        store.transaction('inner action', (innerTx) => {
+          innerTx.emit('NOTE_ADDED', { id: 'n2', scope: 'game', text: 'inner' });
+        });
+      }),
+    ).toThrow(/nest/i);
+    // Neither transaction committed anything.
+    expect(store.getEvents()).toHaveLength(before);
+    // A later, non-nested transaction still works: re-entrancy did not wedge
+    // the guard open.
+    const result = store.transaction('after the failed nesting', (tx) =>
+      tx.emit('NOTE_ADDED', { id: 'n3', scope: 'game', text: 'fine now' }),
+    );
+    expect(result.events).toHaveLength(1);
+  });
+
+  it('throws if a caller retains Tx and emits after the transaction has ended', () => {
+    const store = seeded();
+    let leaked: Tx | undefined;
+    store.transaction('leaks its tx', (tx) => {
+      leaked = tx;
+      tx.emit('NOTE_ADDED', { id: 'n1', scope: 'game', text: 'inside the transaction' });
+    });
+    const before = store.getEvents().length;
+    expect(() =>
+      leaked!.emit('NOTE_ADDED', { id: 'n2', scope: 'game', text: 'after the transaction' }),
+    ).toThrow(/ended|committed/i);
+    // The leaked emit must not have appended anything to the store's log.
+    expect(store.getEvents()).toHaveLength(before);
+  });
+
+  it('rejects an async transaction body rather than silently committing a truncated action', async () => {
+    const store = seeded();
+    const before = store.getEvents().length;
+    let secondEmitError: unknown = null;
+    let resumed: Promise<void> = Promise.resolve();
+
+    // TypeScript's void-return special case accepts this async body, and this
+    // repo's untyped ESLint config has no no-misused-promises to flag it.
+    // Without FIX 2, everything emitted before the `await` below would commit
+    // silently, and the emit after it would vanish with no error at all.
+    expect(() => {
+      store.transaction('half an action, asynchronously', (tx) => {
+        resumed = (async () => {
+          tx.emit('NOTE_ADDED', { id: 'n1', scope: 'game', text: 'before the await' });
+          await Promise.resolve();
+          // The Tx is sealed the instant transaction() returned (synchronously,
+          // below) — this must throw rather than silently mutate an abandoned
+          // local array. Caught here, not left to become an unhandled rejection.
+          try {
+            tx.emit('NOTE_ADDED', { id: 'n2', scope: 'game', text: 'after the await' });
+          } catch (error) {
+            secondEmitError = error;
+          }
+        })();
+        return resumed;
+      });
+    }).toThrow(/promise|async|await/i);
+
+    // Nothing committed — not even the part staged before the first await.
+    expect(store.getEvents()).toHaveLength(before);
+
+    await resumed;
+    expect(secondEmitError).toBeInstanceOf(Error);
+    expect((secondEmitError as Error).message).toMatch(/ended|committed/i);
+    expect(store.getEvents()).toHaveLength(before);
+  });
 });
 
 describe('commit-time victory (§4.7)', () => {
@@ -165,18 +275,24 @@ describe('commit-time victory (§4.7)', () => {
   });
 
   it('checks victory exactly once per transaction', () => {
+    // Spies on the real `checkVictory`, not the `onVictoryCheck` seam: that seam
+    // fires once per transaction by construction (it sits at the single commit
+    // call site), so it would count the same whether checkVictory itself ran
+    // once or moved into `append` and ran per event. Spying on the module
+    // itself is the only version of this test that actually counts invocations
+    // of the function §4.7 requires to run exactly once.
     const store = seeded();
-    let checks = 0;
-    store.transaction(
-      'three events',
-      (tx) => {
+    const spy = vi.spyOn(victoryModule, 'checkVictory');
+    try {
+      store.transaction('three events', (tx) => {
         tx.emit('DEATH', { playerId: 'p4', characterIdAtDeath: 'chef', cause: 'demon' });
         tx.emit('NOTE_ADDED', { id: 'n', scope: 'game', text: 'x' });
         tx.emit('RULE_FLAGGED', { rule: 'x', relatedTxId: 'tx0', class: 'social', detail: 'y' });
-      },
-      { onVictoryCheck: () => (checks += 1) },
-    );
-    expect(checks).toBe(1);
+      });
+      expect(spy).toHaveBeenCalledTimes(1);
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it('passes dayClosed so the Mayor row is only reachable at day close', () => {
@@ -234,6 +350,16 @@ describe('undo (§3.4)', () => {
     expect(
       store.getState().players.find((p) => p.id === 'p4')?.statusLedger.map((s) => s.status),
     ).toEqual(['redHerring']);
+    // §3.2 — seq is the array index. NOTE this particular assertion cannot
+    // redden on its own: this undo removes the tail-most transaction, so the
+    // surviving events already had seq == index before the undo and keep it
+    // whether or not undo() renumbers anything. The renumber is load-bearing
+    // only when undo removes a NON-tail transaction (skipping past a trailing
+    // non-undoable block) — see 'never drops the Spy audit trail' below, where
+    // this same assertion is reachable.
+    expect(store.getEvents().map((e) => e.seq)).toEqual(
+      store.getEvents().map((_, index) => index),
+    );
   });
 
   it('undoes the win along with the death that caused it', () => {
@@ -266,6 +392,14 @@ describe('undo (§3.4)', () => {
     expect(types).toContain('SPY_VIEWED');
     expect(types).toContain('SPY_VIEW_ENDED');
     expect(types).not.toContain('NOTE_ADDED');
+    // §3.2 — seq is the array index. This undo removes a txId that is NOT the
+    // tail of the log (SPY_VIEWED/SPY_VIEW_ENDED survive after it), so the
+    // surviving SPY events' original seq values are now ahead of their new
+    // array positions by one — this is the reachable case for the renumber
+    // that 'drops every event sharing the last txId' cannot exercise.
+    expect(store.getEvents().map((e) => e.seq)).toEqual(
+      store.getEvents().map((_, index) => index),
+    );
   });
 
   it('reports canUndo false when only non-undoable events remain', () => {
@@ -320,5 +454,33 @@ describe('undo (§3.4)', () => {
     const store = seeded();
     const events = JSON.parse(JSON.stringify(store.getEvents())) as GameEvent[];
     expect(createStore(events).getState()).toEqual(store.getState());
+  });
+
+  it('leaves getEvents()/getState() in agreement if the post-undo replay throws', () => {
+    // applyEvent throws in several places, but every txId undo can ever remove
+    // is followed only by no-op event types (NON_UNDOABLE_EVENT_TYPES is exactly
+    // SPY_VIEWED/SPY_VIEW_ENDED, both no-ops in applyEvent), so the truncated
+    // log undo produces is always a valid prefix — there is no reachable
+    // domain scenario where reduce() actually throws mid-undo. That is a
+    // property of today's event catalogue, not a guarantee `undo()` enforces
+    // itself, so this pins the ordering directly by fault-injecting a replay
+    // failure: if `state` were ever assigned from a truncated `events` before
+    // the replay had succeeded, this is exactly the divergence that would leak.
+    const store = seeded();
+    store.transaction('note something', (tx) => tx.emit('NOTE_ADDED', { id: 'n', scope: 'game', text: 'x' }));
+    const eventsBefore = store.getEvents();
+    const stateBefore = store.getState();
+    const spy = vi.spyOn(foldModule, 'reduce').mockImplementation(() => {
+      throw new Error('simulated replay failure');
+    });
+    try {
+      expect(() => store.undo()).toThrow(/simulated replay failure/);
+      // Neither field moved: getEvents() and getState() still agree with each
+      // other, and both still reflect the log from before the failed undo.
+      expect(store.getEvents()).toBe(eventsBefore);
+      expect(store.getState()).toBe(stateBefore);
+    } finally {
+      spy.mockRestore();
+    }
   });
 });
