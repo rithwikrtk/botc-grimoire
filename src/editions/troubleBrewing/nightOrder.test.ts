@@ -210,6 +210,34 @@ describe('step conditions (§6.3)', () => {
     expect(minionInfo.condition(view, minionInfo.wakes(view))).toBe(true);
   });
 
+  // §6.3's "7+ players only" qualifier is a named v2 regression (v2 dropped it,
+  // v1 had it right) — pin the exact boundary rather than leaving it free to
+  // drift to 6 or 8 while the 5-vs-9 tests above still pass either way.
+  it('pins the Minion/Demon info threshold at exactly 7, not 6 or 8', () => {
+    const six = toRulesView(
+      buildGame({
+        roles: [
+          ['p1', 'imp'], ['p2', 'poisoner'], ['p3', 'chef'], ['p4', 'empath'], ['p5', 'monk'],
+          ['p6', 'butler'],
+        ],
+      }).state,
+    );
+    const seven = toRulesView(
+      buildGame({
+        roles: [
+          ['p1', 'imp'], ['p2', 'poisoner'], ['p3', 'chef'], ['p4', 'empath'], ['p5', 'monk'],
+          ['p6', 'butler'], ['p7', 'saint'],
+        ],
+      }).state,
+    );
+    const minionInfo = FIRST_NIGHT.find((s) => s.id === 'minion_info')!;
+    const demonInfo = FIRST_NIGHT.find((s) => s.id === 'demon_info')!;
+    expect(minionInfo.condition(six, minionInfo.wakes(six))).toBe(false);
+    expect(demonInfo.condition(six, demonInfo.wakes(six))).toBe(false);
+    expect(minionInfo.condition(seven, minionInfo.wakes(seven))).toBe(true);
+    expect(demonInfo.condition(seven, demonInfo.wakes(seven))).toBe(true);
+  });
+
   it('runs the Undertaker only when someone was executed today', () => {
     const quiet = toRulesView(nine({ kind: 'night', number: 2 }).state);
     const undertaker = OTHER_NIGHTS.find((s) => s.id === 'undertaker')!;

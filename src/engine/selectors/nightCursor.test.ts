@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { buildGame } from '@test/helpers/game';
 import { nextStep, nightOverview, stepKey } from './nightCursor';
-import { OTHER_NIGHTS } from '@/editions/troubleBrewing/nightOrder';
+import { FIRST_NIGHT, OTHER_NIGHTS } from '@/editions/troubleBrewing/nightOrder';
 
 function nine(upTo: { kind: 'night' | 'day'; number: number }) {
   return buildGame({
@@ -33,8 +33,12 @@ describe('stepKey (§3.7, §6.1)', () => {
   });
 
   it('is one key for the whole set on a group step', () => {
-    const dusk = OTHER_NIGHTS.find((s) => s.id === 'dusk_confirm_eyes_closed')!;
-    expect(stepKey(dusk, { kind: 'night', number: 3 }, null)).toBe('3:dusk_confirm_eyes_closed:GROUP');
+    // minion_info is grouping 'group' (unlike dusk, which is 'pseudo' and takes
+    // the same GROUP-key branch for a different reason) — it only runs on the
+    // first night (guide §2, §5.2), hence FIRST_NIGHT here.
+    const minionInfo = FIRST_NIGHT.find((s) => s.id === 'minion_info')!;
+    expect(minionInfo.grouping).toBe('group');
+    expect(stepKey(minionInfo, { kind: 'night', number: 3 }, null)).toBe('3:minion_info:GROUP');
   });
 });
 
@@ -62,7 +66,12 @@ describe('nextStep (§6.1)', () => {
   it('treats a skipped step as settled and advances', () => {
     const b = nine({ kind: 'night', number: 2 });
     const first = settleCurrent(b);
-    expect(nextStep(b.state)?.step.id).not.toBe(first);
+    expect(first).toBe('dusk_confirm_eyes_closed');
+    // Asserted against the real next step id, not just "not the same as
+    // before" — that weaker assertion is satisfied by `undefined` too, so a
+    // cursor that stalled to null after one skip would pass a test named for
+    // catching exactly that stall.
+    expect(nextStep(b.state)?.step.id).toBe('poisoner');
   });
 
   it('offers a per-actor step once per actor', () => {

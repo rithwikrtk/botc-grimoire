@@ -139,8 +139,19 @@ export function nightOverview(state: GameState): OverviewRow[] {
     const actors = step.grouping === 'pseudo' ? [] : step.wakes(view);
     if (step.grouping !== 'pseudo' && actors.length === 0) continue;
 
+    // Per-actor settleScope (every per-actor step except the Imp) gets one row
+    // per actor, so a real Monk and a Drunk-believing-Monk each get their own
+    // row. The Imp is grouping 'per-actor' but settleScope 'per-night' — one
+    // row, but it must still carry its (single) actor, or nightOverview's row
+    // disagrees with nextStep's CursorPosition about who is acting (Plan 2
+    // renders this row). Every other per-night step (dusk, minion/demon info,
+    // dawn) has no actor at all.
     const entries: Array<RulesViewPlayer | null> =
-      step.settleScope === 'per-actor' ? actors : [null];
+      step.settleScope === 'per-actor'
+        ? actors
+        : step.grouping === 'per-actor'
+          ? [actors[0] ?? null]
+          : [null];
 
     for (const actor of entries) {
       const key = stepKey(step, state.phase, actor?.id ?? null);
