@@ -106,6 +106,25 @@ describe('evaluateSlayer (§7, §16.12)', () => {
     });
   });
 
+  // Review round 2, follow-up — `ruleTargetAsDemon: false` is the ONLY way a
+  // Storyteller can decline the ruling and have the claim resolve at all
+  // (everything else now throws via FIX 1b's needsRegistrationRuling). This is
+  // the escape hatch's witness: `=== undefined` must stay distinct from a
+  // falsy check, or an explicit decline would be treated as "undecided" and
+  // permanently blocked.
+  it('resolves rather than asking again once the Storyteller has declined the Demon ruling', () => {
+    const view = toRulesView(day().state);
+    const declined = evaluateSlayer(view, 'p3', 'p4', { ruleTargetAsDemon: false });
+    expect(declined).toMatchObject({
+      needsRegistrationRuling: false,
+      outcome: 'nothing',
+      targetRegisteredAsDemon: false,
+    });
+    // Pins the "not the Demon" branch specifically, not one of the other four
+    // `nothing` guards (bluff, spent, non-functional, dead target).
+    expect(declined.reason).toMatch(/is not the Demon/i);
+  });
+
   it('does not offer a Demon ruling for a player who cannot register as one', () => {
     expect(evaluateSlayer(toRulesView(day().state), 'p3', 'p5').canRuleAsDemon).toBe(false);
   });

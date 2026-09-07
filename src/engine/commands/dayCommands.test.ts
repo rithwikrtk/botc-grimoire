@@ -415,6 +415,19 @@ describe('day commands (§4.8, §7)', () => {
     expect(store.getState().players.find((p) => p.id === 'p3')?.slayerUsed).toBe(false);
   });
 
+  // Review round 2, follow-up — the escape hatch's end-to-end witness: an
+  // explicit decline must resolve where an undecided ruling (above) throws.
+  // Without this, a refactor from `=== undefined` to a falsy check would pass
+  // every other test in the suite while permanently blocking a legitimate
+  // Storyteller decision.
+  it('resolves a Slayer claim once the Storyteller has explicitly declined the Demon ruling', () => {
+    const store = seededWithSlayerAndRecluse();
+    expect(() => claimSlayer(store, 'p3', 'p4', { ruleTargetAsDemon: false })).not.toThrow();
+    expect(store.getState().players.find((p) => p.id === 'p4')?.alive).toBe(true);
+    // Spent even on a miss — the claim still resolved and recorded (§4.8).
+    expect(store.getState().players.find((p) => p.id === 'p3')?.slayerUsed).toBe(true);
+  });
+
   // Review round 1, FIX 2 — the only command-layer exercise of the §16.3 ruling's
   // permanent forensic record. §3.6 makes butlerVotesFlagged write-only (no
   // selector reads it), so a broken wire here would silently drop every Butler
