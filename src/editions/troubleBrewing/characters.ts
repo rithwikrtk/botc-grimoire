@@ -2,44 +2,53 @@ export type Team = 'townsfolk' | 'outsider' | 'minion' | 'demon';
 export type Alignment = 'good' | 'evil';
 
 export interface TeamCounts {
-  townsfolk: number;
-  outsider: number;
-  minion: number;
-  demon: number;
+  readonly townsfolk: number;
+  readonly outsider: number;
+  readonly minion: number;
+  readonly demon: number;
 }
 
 export interface RegistrationOption {
-  alignment: Alignment;
-  team: Team;
+  readonly alignment: Alignment;
+  readonly team: Team;
 }
 
 export interface Character {
-  id: string;
-  name: string;
-  team: Team;
-  abilityText: string;
+  readonly id: string;
+  readonly name: string;
+  readonly team: Team;
+  readonly abilityText: string;
   /**
    * Whether the ability needs the holder alive. §4.2 — false for the Ravenkeeper
    * (their ability fires because they died) and the Saint (their win check happens
    * after their death). Never duplicated onto a night step (§6.2).
    */
-  requiresAlive: boolean;
+  readonly requiresAlive: boolean;
   /** The holder believes they are a different character (§4.1). Drunk only. */
-  falseSelfBelief: boolean;
+  readonly falseSelfBelief: boolean;
   /**
    * How this character may register to detection abilities, true option first.
-   * Empty means it registers only as its own team and alignment. Registration is a
-   * passive property and is NOT gated by abilityFunctional (§4.2).
+   * A one-element array is the character's own team and alignment; more than one
+   * element means the character has ambiguous registration (Recluse, Spy).
+   * Registration is a passive property and is NOT gated by abilityFunctional (§4.2).
    */
-  registration: readonly RegistrationOption[];
+  readonly registration: readonly RegistrationOption[];
   /** Team deltas applied after Minions are drawn (§5.2). Baron only. */
-  setupModifiers: Partial<TeamCounts> | null;
+  readonly setupModifiers: Partial<TeamCounts> | null;
 }
 
-const GOOD_TOWNSFOLK: RegistrationOption[] = [{ alignment: 'good', team: 'townsfolk' }];
-const GOOD_OUTSIDER: RegistrationOption[] = [{ alignment: 'good', team: 'outsider' }];
-const EVIL_MINION: RegistrationOption[] = [{ alignment: 'evil', team: 'minion' }];
-const EVIL_DEMON: RegistrationOption[] = [{ alignment: 'evil', team: 'demon' }];
+const GOOD_TOWNSFOLK: readonly RegistrationOption[] = Object.freeze([
+  { alignment: 'good', team: 'townsfolk' },
+]);
+const GOOD_OUTSIDER: readonly RegistrationOption[] = Object.freeze([
+  { alignment: 'good', team: 'outsider' },
+]);
+const EVIL_MINION: readonly RegistrationOption[] = Object.freeze([
+  { alignment: 'evil', team: 'minion' },
+]);
+const EVIL_DEMON: readonly RegistrationOption[] = Object.freeze([
+  { alignment: 'evil', team: 'demon' },
+]);
 
 function character(
   id: string,
@@ -54,16 +63,21 @@ function character(
     minion: EVIL_MINION,
     demon: EVIL_DEMON,
   };
-  return {
+  const setupModifiers = overrides.setupModifiers ?? null;
+  return Object.freeze({
     id,
     name,
     team,
     abilityText,
     requiresAlive: overrides.requiresAlive ?? true,
     falseSelfBelief: overrides.falseSelfBelief ?? false,
-    registration: overrides.registration ?? base[team],
-    setupModifiers: overrides.setupModifiers ?? null,
-  };
+    // Freezing here (rather than only at each override's call site) deep-freezes the
+    // whole set by construction: shared constants are already frozen at declaration,
+    // and this also catches any per-character override array (Recluse, Spy) that
+    // was not pre-frozen at its call site.
+    registration: Object.freeze(overrides.registration ?? base[team]),
+    setupModifiers: setupModifiers ? Object.freeze(setupModifiers) : null,
+  });
 }
 
 const LIST: readonly Character[] = [

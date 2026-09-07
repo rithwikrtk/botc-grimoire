@@ -45,4 +45,9 @@ describe('Trouble Brewing character list', () => {
   it('rejects an unknown character id loudly', () => {
     expect(() => characterById('lunatic')).toThrow(/unknown character/i);
   });
+
+  // Freeze depth — a shared module singleton must not be mutable by any consumer.
+  it('freezes each character object', () => {
+    expect(Object.isFrozen(characterById('imp'))).toBe(true);
+  });
 });

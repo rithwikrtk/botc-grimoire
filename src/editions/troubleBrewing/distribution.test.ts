@@ -36,4 +36,9 @@ describe('player-count distribution chart', () => {
     expect(() => distributionFor(4)).toThrow(/between 5 and 15/);
     expect(() => distributionFor(16)).toThrow(/between 5 and 15/);
   });
+
+  // Freeze depth — the map is frozen, but so must each TeamCounts value it hands out.
+  it('freezes each TeamCounts value', () => {
+    expect(Object.isFrozen(distributionFor(10))).toBe(true);
+  });
 });
