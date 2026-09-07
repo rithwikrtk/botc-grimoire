@@ -212,6 +212,18 @@ export function endGame(
  * Records the Virgin trigger and, when it fired, executes the nominator. Called
  * right after `nominate`, in its own transaction, so undoing the execution does
  * not undo the nomination — they are two things that happened at the table.
+ *
+ * Requires the phase to be day, matching `closeDay` and `beginNight` in this
+ * same file. `nominationIssues` has no phase check of any kind — not even an
+ * advisory flag — so `nominate` + `applyVirgin` at night is fully reachable
+ * with no friction. That is not merely a stray DEATH: `applyDeath` appends
+ * every execution-caused death to `todaysExecutions`, which is cleared only on
+ * entry into a day, never a night (deliberately, so the Undertaker can read it
+ * at night) — so a night trigger injects a phantom execution into the very
+ * Undertaker answer set that same night, and the Undertaker is told the
+ * character of a player nobody executed. The nomination itself stays logged
+ * (§7's four nomination checks are unchanged); only the derived death is
+ * refused.
  */
 export function applyVirgin(
   store: Store,
@@ -219,6 +231,7 @@ export function applyVirgin(
   nomineeId: PlayerId,
   opts: { ruleNominatorAsTownsfolk?: boolean } = {},
 ): TransactionResult {
+  if (store.getState().phase.kind !== 'day') throw new Error('It is not day');
   const view = toRulesView(store.getState());
   const evaluation = evaluateVirgin(view, nominatorId, nomineeId, opts);
   if (!evaluation.isVirginNomination || !evaluation.consumed) {

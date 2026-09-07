@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { createStore, type Store } from './store';
-import { beginNight, castVote, closeDay, closeNomination, endGame, nominate } from './dayCommands';
+import {
+  applyVirgin,
+  beginNight,
+  castVote,
+  closeDay,
+  closeNomination,
+  endGame,
+  nominate,
+} from './dayCommands';
 import { expiryFor } from '@/engine/phase';
 
 const ROLES: Array<[string, string]> = [
@@ -291,6 +299,16 @@ describe('day commands (§4.8, §7)', () => {
   it('refuses to close a day that is not the current phase', () => {
     const store = seededAtNight();
     expect(() => closeDay(store)).toThrow(/it is not day/i);
+  });
+
+  // Pre-review correction: nominationIssues has no phase check of any kind, so
+  // nominate + applyVirgin at night was fully reachable with no friction, and a
+  // night trigger injects a phantom execution into that very night's Undertaker
+  // answer set (todaysExecutions is cleared only on entry into a day). The
+  // nomination stays reachable at night — only the derived death is refused.
+  it('refuses to apply the Virgin outside of the day', () => {
+    const store = seededAtNight();
+    expect(() => applyVirgin(store, 'p4', 'p1')).toThrow(/it is not day/i);
   });
 
   // Review round 1, FIX 2 — the only command-layer exercise of the §16.3 ruling's
