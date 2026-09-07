@@ -132,7 +132,7 @@ millisecond".
 
 ```
 GAME_CREATED        { players: [{id, name, seat}], edition: {id, version} }
-PLAYER_CHANGED      { playerId, op: 'rename'|'reseat', ...fields }
+PLAYER_RENAMED      { playerId, name }        // typos only; seating is immutable
 
 ROLES_ASSIGNED      { assignments: {playerId: characterId},
                       distribution: {townsfolk, outsiders, minions, demons},
@@ -471,26 +471,14 @@ Two classes, because they deserve different handling:
 3. **Edit.** Swap, reroll all, reroll one. Legality re-validated.
 4. **Lock in.** Records the post-modifier `distribution`, which is **public** and
    displayed persistently thereafter.
-5. **Confirm seating.** A seat-ring view and an explicit confirmation. Seating is
-   load-bearing for Chef and Empath, and a circle entered backwards or off by one
-   makes every positional answer wrong for the whole game — a failure no unit test
-   can reach. Re-confirmed at each dusk with one tap: *Seating unchanged? [Yes] /
-   [Someone moved]*.
+5. **Confirm seating.** A seat-ring view and an explicit confirmation, once, before
+   the game starts. Seating is load-bearing for Chef and Empath, and a circle entered
+   backwards or off by one makes every positional answer wrong for the whole game — a
+   failure no unit test can reach, because the code is correct and the input is not.
+   This one screen is the only defence against it.
 
-### 5.6 Roster changes mid-game
-
-The roster is **fixed once roles are locked in**. Nobody joins or leaves a game in
-progress — see §18. Two edits remain, because both are typo-and-chair-shuffle
-reality rather than roster changes:
-
-| `op` | Effect |
-|---|---|
-| `rename` | Cosmetic. Nothing else changes. |
-| `reseat` | The circle is rebuilt. Seat adjacency feeds Chef and Empath, so positional answers already given become stale — flagged via `RULE_FLAGGED { class: 'integrity' }`, and never rewritten. What was said at the table stands as spoken. |
-
-`reseat` exists because people genuinely do swap chairs on the way back from the
-kitchen, and a circle that no longer matches the room makes every subsequent Empath
-answer wrong. §5.5's dusk seating check is what catches it.
+   **Seating is immutable thereafter.** Players do not change seats mid-game, so
+   there is no reseat path and no per-night re-confirmation (§18).
 
 ---
 
@@ -548,8 +536,8 @@ cannot see notes or the lies ledger. Default selection among candidates happens
 **once on step entry**, never during render, or the Washerwoman decoy reshuffles
 every frame.
 
-Pseudo-steps in both orders: `dusk_confirm_eyes_closed` (skippable countdown, plus
-the §5.5 seating check), `dawn_wait`, `dawn_announce_deaths` (renders the resolved
+Pseudo-steps in both orders: `dusk_confirm_eyes_closed` (skippable countdown),
+`dawn_wait`, `dawn_announce_deaths` (renders the resolved
 outcome, including "no one died tonight" when the Monk blocked it).
 
 Group steps: Minion info (eye contact, conditional on ≥2 Minions) and Demon info
@@ -970,15 +958,16 @@ and Reference screen (§8.1), seating confirmation (§5.5), the guarded Spy hand
 night 2 would have ended immediately (§3.7, §6.1); status-expiry comparison semantics
 and the night-N-then-day-N phase ordering were never stated (§4.4); the Empath worked
 example in §8.2 contradicted itself and the Chef example used an illegal
-distribution; `PLAYER_CHANGED` had no semantics (§5.6); `requiresAlive` was defined
+distribution; mid-game player changes had no semantics; `requiresAlive` was defined
 on both the character and the step (§4.2, §6.2); "re-run the three guards" named five
 (§4.5); §10.3 and §11 hooked `visibilitychange` with opposite intents and no
 precedence (§11); no action closed the day or ended a game, leaving the Mayor win and
 `reason: 'abandoned'` unreachable (§7); private-mode detection by sentinel could not
 distinguish a first run (§12.3); Scarlet Woman vs starpass precedence reversed
 (§4.6, §16.9); plus import-during-game, Spy Mode effectiveness leakage, and the
-per-actor scope of `perceivedCharacterId`. Mid-game player add/remove was then cut
-from scope entirely; `PLAYER_CHANGED` keeps only `rename` and `reseat`.
+per-actor scope of `perceivedCharacterId`. Mid-game roster and seating changes were
+then cut from scope entirely — no add, remove or reseat — leaving `PLAYER_RENAMED`
+for typos and a single seating confirmation at setup.
 
 **v2 fixed** (from a three-lens review): the Drunk never waking; no win-condition
 engine; the night queue built before mid-night conditions were knowable; "compute the
@@ -990,10 +979,11 @@ daytime path; ability effects ungated by poison/drunk.
 
 Custom scripts, Travellers, Fabled, multiplayer or networked play, accounts,
 multi-game archive, a live Spy link on a second device, practice mode, a
-paper-handoff snapshot screen, and **mid-game roster changes** — players do not join
-or leave once roles are locked in, so there is no add or remove path (§5.6). A player
-who must drop out is handled as a death like any other: `DEATH { cause: 'other' }`,
-left seated, adjacency unchanged. **Never** put game state in a URL fragment or query
+paper-handoff snapshot screen, and **every mid-game change to the roster or the
+circle**. Once roles are locked in, the set of players and the seating order are
+fixed: no add, no remove, no reseat, and no per-night seating re-check. A player who
+must drop out is handled as a death like any other — `DEATH { cause: 'other' }`, left
+seated, adjacency unchanged. Only `PLAYER_RENAMED` survives, for typos. **Never** put game state in a URL fragment or query
 string — it would land in history, the address bar and autocomplete.
 
 Other editions are out of scope to *build*, not to *accommodate*: no other-edition
