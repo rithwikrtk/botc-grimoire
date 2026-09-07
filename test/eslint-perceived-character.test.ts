@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 import { ESLint } from 'eslint';
 
 const eslint = new ESLint({ cwd: process.cwd() });
@@ -7,6 +7,17 @@ async function lint(filePath: string, code: string): Promise<string[]> {
   const [result] = await eslint.lintText(code, { filePath, warnIgnored: false });
   return (result?.messages ?? []).map((m) => `${m.ruleId ?? 'unknown'}: ${m.message}`);
 }
+
+// The FIRST lintText call in the process pays ESLint's whole bootstrap — config
+// resolution, plugin loading, and typescript-eslint's parser — which is seconds,
+// not milliseconds, on a cold or loaded machine. Whichever `it` happened to run
+// first therefore carried that cost inside the default 5s test timeout and could
+// time out for reasons that have nothing to do with what it asserts. Pay it here
+// instead, with a timeout sized for the bootstrap; every case below is then a
+// few milliseconds.
+beforeAll(async () => {
+  await lint('src/engine/rules/warmup.ts', 'export const warm = 1;\n');
+}, 120_000);
 
 describe('§4.1 enforcement — where perceivedCharacterId may be imported', () => {
   it('rejects the import from a rules module', async () => {
