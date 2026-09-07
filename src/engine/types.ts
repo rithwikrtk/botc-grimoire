@@ -174,6 +174,12 @@ export interface GameState {
   ruleFlags: RuleFlag[];
   deaths: DeathRecord[];
   notes: Note[];
+  /**
+   * Every registration ruling made, in order, as flat arrays per event. Feeds
+   * §16.6's consistency flag and Slice 2's registration ledger (§9), which is why
+   * VIRGIN_TRIGGERED and SLAYER_CLAIMED also carry their rulings (Task 15).
+   */
+  registrationHistory: RegistrationRuling[][];
   victory: Victory;
   /**
    * Private Storyteller scratch. Seeded in Slice 1 for one reason: Plan 3's Spy

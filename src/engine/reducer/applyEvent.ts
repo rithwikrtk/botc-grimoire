@@ -29,6 +29,7 @@ export function initialState(): GameState {
     ruleFlags: [],
     deaths: [],
     notes: [],
+    registrationHistory: [],
     victory: { status: 'ongoing', reason: null },
     stPrivate: { plannerNote: '' },
   };
@@ -290,7 +291,11 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
           demonNotified: stepId === SCARLET_WOMAN_NOTIFY_STEP_ID ? true : p.demonNotified,
         }));
       }
-      return next;
+      const registrationHistory =
+        event.payload.registrationRulings.length > 0
+          ? [...next.registrationHistory, event.payload.registrationRulings]
+          : next.registrationHistory;
+      return { ...next, registrationHistory };
     }
 
     case 'NIGHT_STEP_SKIPPED':
@@ -390,22 +395,34 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
       // without touching the list (§4.7 row 4).
       return state;
 
-    case 'VIRGIN_TRIGGERED':
+    case 'VIRGIN_TRIGGERED': {
       // The Virgin loses the ability either way, poisoned or not (§16.10). The
       // nominee is the Virgin; the nominator is who dies, in a separate DEATH
       // event in the same transaction.
-      return mapPlayer(state, event.payload.nomineeId, (p) =>
+      const next = mapPlayer(state, event.payload.nomineeId, (p) =>
         p.virginTriggered ? p : { ...p, virginTriggered: true },
       );
+      const registrationHistory =
+        event.payload.registrationRulings.length > 0
+          ? [...next.registrationHistory, event.payload.registrationRulings]
+          : next.registrationHistory;
+      return { ...next, registrationHistory };
+    }
 
-    case 'SLAYER_CLAIMED':
+    case 'SLAYER_CLAIMED': {
       // Only a real Slayer consumes the once-per-game ability. A bluffing claimant
       // has no ability to spend.
-      return event.payload.claimantIsRealSlayer
+      const next = event.payload.claimantIsRealSlayer
         ? mapPlayer(state, event.payload.claimantId, (p) =>
             p.slayerUsed ? p : { ...p, slayerUsed: true },
           )
         : state;
+      const registrationHistory =
+        event.payload.registrationRulings.length > 0
+          ? [...next.registrationHistory, event.payload.registrationRulings]
+          : next.registrationHistory;
+      return { ...next, registrationHistory };
+    }
 
     case 'RULE_FLAGGED':
       return {
