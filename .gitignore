@@ -6,3 +6,4 @@ dist/
 .vite/
 coverage/
 .claude/phoenix/
+.superpowers/
