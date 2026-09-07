@@ -48,14 +48,18 @@ export function advanceTo(
 ): LogBuilder {
   let current = builder.state.phase;
   while (current.kind !== target.kind || current.number !== target.number) {
-    current =
+    const next: { kind: 'night' | 'day'; number: number } =
       current.kind === 'night'
         ? { kind: 'day', number: current.number }
         : { kind: 'night', number: current.number + 1 };
-    builder.push('PHASE_ADVANCED', { phase: current.kind, number: current.number });
-    if (current.number > target.number + 1) {
+    // Checked BEFORE pushing: an unreachable target must throw with the log
+    // untouched, not after already emitting up to three spurious PHASE_ADVANCED
+    // events into it.
+    if (next.number > target.number + 1) {
       throw new Error(`advanceTo overshot ${target.kind} ${target.number}`);
     }
+    current = next;
+    builder.push('PHASE_ADVANCED', { phase: current.kind, number: current.number });
   }
   return builder;
 }

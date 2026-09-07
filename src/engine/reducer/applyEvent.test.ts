@@ -1,8 +1,15 @@
-import { describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it } from 'vitest';
 import { applyEvent, initialState, reduce } from './fold';
 import type { GameEvent } from '../events';
 
+// Reset before every test, not just inside fivePlayerLog: relying on a reset
+// buried in one helper made every later evt(...) call depend on that helper
+// having just run, which breaks silently under any test reorder.
 let nextSeq = 0;
+beforeEach(() => {
+  nextSeq = 0;
+});
+
 function evt<T extends GameEvent['type']>(
   type: T,
   payload: Extract<GameEvent, { type: T }>['payload'],
@@ -11,8 +18,7 @@ function evt<T extends GameEvent['type']>(
   return { seq: nextSeq++, txId, ts: 1_700_000_000_000 + nextSeq, type, payload } as GameEvent;
 }
 
-function fourPlayerLog(): GameEvent[] {
-  nextSeq = 0;
+function fivePlayerLog(): GameEvent[] {
   return [
     evt('GAME_CREATED', {
       edition: { id: 'troubleBrewing', version: '1' },
@@ -44,7 +50,7 @@ function fourPlayerLog(): GameEvent[] {
 
 describe('applyEvent — envelope and roster', () => {
   it('seats players in the order given and derives nothing else from GAME_CREATED', () => {
-    const state = reduce(fourPlayerLog().slice(0, 1));
+    const state = reduce(fivePlayerLog().slice(0, 1));
     expect(state.players.map((p) => [p.seat, p.name])).toEqual([
       [0, 'One'],
       [1, 'Two'],
@@ -58,7 +64,7 @@ describe('applyEvent — envelope and roster', () => {
   });
 
   it('derives alignment and team from the assigned character', () => {
-    const state = reduce(fourPlayerLog());
+    const state = reduce(fivePlayerLog());
     const byId = new Map(state.players.map((p) => [p.id, p]));
     expect(byId.get('p1')).toMatchObject({ alignment: 'evil', team: 'demon' });
     expect(byId.get('p2')).toMatchObject({ alignment: 'evil', team: 'minion' });
@@ -66,7 +72,7 @@ describe('applyEvent — envelope and roster', () => {
   });
 
   it('sets demonSince on the initial deal so §6.3 has a baseline', () => {
-    const state = reduce(fourPlayerLog());
+    const state = reduce(fivePlayerLog());
     expect(state.players.find((p) => p.id === 'p1')?.demonSince).toEqual({
       kind: 'night',
       number: 0,
@@ -74,7 +80,7 @@ describe('applyEvent — envelope and roster', () => {
   });
 
   it('renames without touching seating', () => {
-    const log = [...fourPlayerLog(), evt('PLAYER_RENAMED', { playerId: 'p2', name: 'Twoo' })];
+    const log = [...fivePlayerLog(), evt('PLAYER_RENAMED', { playerId: 'p2', name: 'Twoo' })];
     const state = reduce(log);
     const p2 = state.players.find((p) => p.id === 'p2');
     expect(p2?.name).toBe('Twoo');
@@ -83,7 +89,7 @@ describe('applyEvent — envelope and roster', () => {
 
   it('derives the phase from the last PHASE_ADVANCED', () => {
     const log = [
-      ...fourPlayerLog(),
+      ...fivePlayerLog(),
       evt('PHASE_ADVANCED', { phase: 'day', number: 1 }),
       evt('PHASE_ADVANCED', { phase: 'night', number: 2 }),
     ];
@@ -92,7 +98,7 @@ describe('applyEvent — envelope and roster', () => {
 
   it('clears todaysExecutions when a new day opens, not when a night opens', () => {
     const log = [
-      ...fourPlayerLog(),
+      ...fivePlayerLog(),
       evt('PHASE_ADVANCED', { phase: 'day', number: 1 }),
       evt('EXECUTION', { playerId: 'p5', kind: 'vote' }),
       evt('DEATH', { playerId: 'p5', characterIdAtDeath: 'chef', cause: 'execution', executionKind: 'vote' }),
@@ -114,7 +120,7 @@ describe('applyEvent — envelope and roster', () => {
 
   it('records deaths as monotonic and never resurrects', () => {
     const log = [
-      ...fourPlayerLog(),
+      ...fivePlayerLog(),
       evt('DEATH', { playerId: 'p3', characterIdAtDeath: 'empath', cause: 'demon' }),
     ];
     const state = reduce(log);
@@ -126,7 +132,7 @@ describe('applyEvent — envelope and roster', () => {
   // §4.8 integrity class: a flagged event must produce no derived state change.
   it('ignores a DEATH for a player who is already dead', () => {
     const log = [
-      ...fourPlayerLog(),
+      ...fivePlayerLog(),
       evt('DEATH', { playerId: 'p3', characterIdAtDeath: 'empath', cause: 'demon' }),
       evt('DEATH', { playerId: 'p3', characterIdAtDeath: 'empath', cause: 'other' }),
     ];
@@ -137,7 +143,7 @@ describe('applyEvent — envelope and roster', () => {
 
   it('applies and clears statuses through the ledger', () => {
     const log = [
-      ...fourPlayerLog(),
+      ...fivePlayerLog(),
       evt('STATUS_APPLIED', {
         playerId: 'p3',
         status: 'poisoned',
@@ -167,7 +173,7 @@ describe('applyEvent — envelope and roster', () => {
   // §3.7, §6.1 — the key must carry the night, or night 2 ends before it starts.
   it('night-scopes settled step keys', () => {
     const log = [
-      ...fourPlayerLog(),
+      ...fivePlayerLog(),
       evt('NIGHT_STEP_SKIPPED', { stepId: 'monk', actorIds: ['p4'], reason: 'condition_unmet' }),
     ];
     expect([...reduce(log).settledStepIds]).toEqual(['1:monk:p4']);
@@ -175,7 +181,7 @@ describe('applyEvent — envelope and roster', () => {
 
   it('keys a group step once for the whole set', () => {
     const log = [
-      ...fourPlayerLog(),
+      ...fivePlayerLog(),
       evt('NIGHT_STEP_RESOLVED', {
         stepId: 'minion_info',
         actorIds: ['p2'],
@@ -194,11 +200,63 @@ describe('applyEvent — envelope and roster', () => {
     const bogus = { seq: 0, txId: 'tx', ts: 0, type: 'NOT_AN_EVENT', payload: {} } as unknown as GameEvent;
     expect(() => applyEvent(initialState(), bogus)).toThrow(/unhandled event type/i);
   });
+
+  // §3.6's v2 correction: actorIds is always an array. A per-actor step
+  // resolving with none would settle no key and stall the night forever, so
+  // this is a malformed event and must throw rather than being silently ignored.
+  it('throws when a per-actor step resolves with no actorIds', () => {
+    const before = reduce(fivePlayerLog());
+    expect(() =>
+      applyEvent(
+        before,
+        evt('NIGHT_STEP_SKIPPED', { stepId: 'empath', actorIds: [], reason: 'condition_unmet' }),
+      ),
+    ).toThrow(/no actorIds/i);
+  });
+});
+
+// §4.8: "no sequence of flagged events can make aliveCount negative, produce two
+// living Demons, or emit a DEATH for a player already dead." The DEATH case is
+// covered above; these two cover the two-living-Demons half, in both directions.
+describe('applyEvent — ROLE_CHANGED integrity guard (§4.8)', () => {
+  it('refuses a ROLE_CHANGED that would create a second living Demon', () => {
+    const log = [
+      ...fivePlayerLog(),
+      evt('ROLE_CHANGED', { playerId: 'p2', from: 'poisoner', to: 'imp', reason: 'st_correction' }),
+    ];
+    const state = reduce(log);
+    const p1 = state.players.find((p) => p.id === 'p1');
+    const p2 = state.players.find((p) => p.id === 'p2');
+    expect(p1).toMatchObject({ alive: true, team: 'demon' });
+    // Unchanged: the guard rejected the correction outright.
+    expect(p2).toMatchObject({ characterId: 'poisoner', team: 'minion' });
+    expect(state.players.filter((p) => p.alive && p.team === 'demon')).toHaveLength(1);
+  });
+
+  it('promotes the Scarlet Woman when her ROLE_CHANGED lands after the Imp DEATH in the same tx', () => {
+    const sharedTx = 'tx-scarlet-woman';
+    const log = [
+      ...fivePlayerLog(),
+      evt('DEATH', { playerId: 'p1', characterIdAtDeath: 'imp', cause: 'other' }, sharedTx),
+      evt(
+        'ROLE_CHANGED',
+        { playerId: 'p2', from: 'poisoner', to: 'imp', reason: 'scarlet_woman' },
+        sharedTx,
+      ),
+    ];
+    const state = reduce(log);
+    const p1 = state.players.find((p) => p.id === 'p1');
+    const p2 = state.players.find((p) => p.id === 'p2');
+    expect(p1?.alive).toBe(false);
+    expect(p2).toMatchObject({ characterId: 'imp', team: 'demon', alignment: 'evil' });
+    expect(p2?.demonSince).toEqual({ kind: 'night', number: 1 });
+    expect(state.players.filter((p) => p.alive && p.team === 'demon')).toHaveLength(1);
+  });
 });
 
 describe('applyEvent — referential stability (§3.5)', () => {
   it('returns identical sub-objects for everything the event did not touch', () => {
-    const log = fourPlayerLog();
+    const log = fivePlayerLog();
     const before = reduce(log);
     const after = applyEvent(
       before,
@@ -218,8 +276,17 @@ describe('applyEvent — referential stability (§3.5)', () => {
   });
 
   it('returns the identical state object when an event changes nothing', () => {
-    const before = reduce(fourPlayerLog());
+    const before = reduce(fivePlayerLog());
     const after = applyEvent(before, evt('PLAYER_RENAMED', { playerId: 'p2', name: 'Two' }));
     expect(after).toBe(before);
+  });
+
+  // The common night -> day transition after a no-execution day must not
+  // allocate a fresh empty array: an already-empty todaysExecutions is an
+  // unchanged sub-object.
+  it('preserves todaysExecutions identity across a night -> day transition with no executions', () => {
+    const before = reduce(fivePlayerLog());
+    const after = applyEvent(before, evt('PHASE_ADVANCED', { phase: 'day', number: 1 }));
+    expect(after.todaysExecutions).toBe(before.todaysExecutions);
   });
 });

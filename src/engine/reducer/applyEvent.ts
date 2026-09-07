@@ -1,12 +1,12 @@
 import { alignmentOf, characterById } from '@/editions/troubleBrewing/characters';
 import type { EventOfType, GameEvent } from '../events';
 import { comparePhases } from '../phase';
-import type { GameState, Nomination, Phase, Player, PlayerId, StatusEntry } from '../types';
+import type { GameState, Nomination, Phase, Player, PlayerId } from '../types';
 
+// statusLedger, claims and infoHistory are NOT here: each player needs its own
+// array instance, so those three are re-declared per player after this spread
+// (see the GAME_CREATED case) rather than shared off one frozen constant.
 const EMPTY_PLAYER_DEFAULTS = {
-  statusLedger: [] as StatusEntry[],
-  claims: [],
-  infoHistory: [],
   deadVoteSpent: false,
   virginTriggered: false,
   slayerUsed: false,
@@ -64,6 +64,14 @@ function stepKeyFromEvent(
   // either loops forever or skips silently, so Task 9 tests that this set agrees
   // with the night order's settleScope.
   if (SINGLE_KEY_STEP_IDS.has(stepId)) return [`${phase.number}:${stepId}:GROUP`];
+  if (actorIds.length === 0) {
+    // §3.6's v2 correction: actorIds is always an array. A per-actor step with
+    // an empty one settles no key at all, so withSettled is a no-op and the
+    // cursor offers the same step forever — a hard stall, at night, live. This
+    // is a malformed event (a programming error, not a table rule break), so it
+    // throws rather than being recorded and ignored per §4.8.
+    throw new Error(`Per-actor step "${stepId}" resolved with no actorIds`);
+  }
   return actorIds.map((actorId) => `${phase.number}:${stepId}:${actorId}`);
 }
 
@@ -83,6 +91,17 @@ export const SINGLE_KEY_STEP_IDS: ReadonlySet<string> = new Set([
   'dawn_wait',
   'dawn_announce_deaths',
 ]);
+
+/**
+ * The step whose NIGHT_STEP_RESOLVED marks the promoted Demon notified (§6.3).
+ * Named here instead of inlined as a string literal because, unlike the steps in
+ * SINGLE_KEY_STEP_IDS, this one is not cross-checked by Task 9's agreement test
+ * against the night order by default — if the night order ever renames this step,
+ * this constant must be updated too, or the promoted Demon is silently
+ * mis-notified every night for the rest of the game. Task 9 must add this
+ * constant to its agreement-test coverage.
+ */
+export const SCARLET_WOMAN_NOTIFY_STEP_ID = 'scarlet_woman_notify';
 
 function withSettled(state: GameState, keys: readonly string[]): GameState {
   const next = new Set(state.settledStepIds);
@@ -243,8 +262,13 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
         ...state,
         phase,
         // A fresh day starts with no executions. Cleared on day entry, not on
-        // night entry, because the Undertaker wakes at night and reads the list (§6.3).
-        todaysExecutions: phase.kind === 'day' ? [] : state.todaysExecutions,
+        // night entry, because the Undertaker wakes at night and reads the list
+        // (§6.3). Only allocate a new empty array when there is something to
+        // clear — an already-empty list is an unchanged sub-object, and §3.5
+        // requires referential identity for those, including across the common
+        // night -> day transition after a no-execution day.
+        todaysExecutions:
+          phase.kind === 'day' && state.todaysExecutions.length > 0 ? [] : state.todaysExecutions,
       };
     }
 
@@ -263,7 +287,7 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
             { seq: event.seq, phase: state.phase, stepId, display: chosenAnswer, answerClass },
           ],
           // §6.3 — persistent, so a daytime promotion notifies the following night.
-          demonNotified: stepId === 'scarlet_woman_notify' ? true : p.demonNotified,
+          demonNotified: stepId === SCARLET_WOMAN_NOTIFY_STEP_ID ? true : p.demonNotified,
         }));
       }
       return next;
@@ -398,7 +422,14 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
         ...state,
         notes: [
           ...state.notes,
-          { id, scope, ...(playerId ? { playerId } : {}), text, seq: event.seq, phase: state.phase },
+          {
+            id,
+            scope,
+            ...(playerId !== undefined ? { playerId } : {}),
+            text,
+            seq: event.seq,
+            phase: state.phase,
+          },
         ],
       };
     }
