@@ -460,8 +460,117 @@ describe('resolveImpStep (§4.5, §4.6)', () => {
       'DEMON_DIED',
       'ROLE_CHANGED',
     ]);
+    // FIX 5 — `reason` is the ONLY thing in the permanent log that says HOW the
+    // token changed hands, and until now no test observed it at any of the four
+    // producers: inverting the ternary left the whole suite green. §16.9 rules
+    // that the Scarlet Woman beats a starpass, so this self-kill promotes HER,
+    // and the reason must say so rather than 'starpass'. Redden by: inverting
+    // the ternary in emitDemonDeath.ts.
+    expect(result.events.find((e) => e.type === 'ROLE_CHANGED')?.payload).toMatchObject({
+      playerId: 'p3',
+      from: 'scarlet_woman',
+      to: 'imp',
+      reason: 'scarlet_woman',
+    });
+    expect(result.events.find((e) => e.type === 'DEMON_DIED')?.payload).toMatchObject({
+      successorReason: 'scarlet_woman',
+    });
     expect(store.getState().players.find((p) => p.id === 'p3')?.characterId).toBe('imp');
     expect(store.getState().victory).toEqual({ status: 'ongoing', reason: null });
+  });
+
+  /**
+   * FIX I3 — the ordinary starpass: the Imp kills themselves, there is no
+   * eligible Scarlet Woman, and the Storyteller hands the token to a living
+   * Minion. `ImpStepOptions.chosenSuccessorId` was passed by NOTHING in the tree
+   * — every hit was `demonDeath.test.ts` calling `onDemonDeath` directly, or one
+   * of the four `{ starpass: false, chosenSuccessorId: null }` call sites — so
+   * neither the `needs_successor_choice` throw nor the emitted
+   * `reason: 'starpass'` had any end-to-end witness. This is also the ONLY call
+   * site in the engine that can produce `reason: 'starpass'` at all, so it is
+   * the other half of FIX 5.
+   *
+   * The Scarlet Woman (p3) is killed on night 2 so she cannot pre-empt the
+   * starpass under §16.9, leaving the Poisoner (p2) as the only living Minion.
+   */
+  function toNightThreeImpWithNoScarletWoman(store: Store): void {
+    toImp(store);
+    resolveImpStep(store, { targetId: 'p3' });
+    while (nextStep(store.getState()) !== null) skipStep(store, 'st_skip');
+    advanceToDay(store);
+    store.transaction('to night 3', (tx) => {
+      tx.emit('DAY_CLOSED', {});
+      tx.emit('PHASE_ADVANCED', { phase: 'night', number: 3 });
+    });
+    let guard = 0;
+    while (nextStep(store.getState())?.step.id !== 'imp') {
+      skipStep(store, 'st_skip');
+      if (++guard > 60) throw new Error('never reached the Imp on night 3');
+    }
+  }
+
+  it('refuses a starpass with living Minions until a successor is named', () => {
+    const store = seeded();
+    toNightThreeImpWithNoScarletWoman(store);
+    expect(store.getState().players.find((p) => p.id === 'p3')?.alive).toBe(false);
+    // Redden by: deleting the `needs_successor_choice` throw in resolveImpStep.
+    expect(() => resolveImpStep(store, { targetId: 'p1' })).toThrow(/chosenSuccessorId/);
+    // Nothing was committed by the refused call.
+    expect(store.getState().players.find((p) => p.id === 'p1')?.alive).toBe(true);
+  });
+
+  it("hands the Imp to the chosen Minion and records reason 'starpass'", () => {
+    const store = seeded();
+    toNightThreeImpWithNoScarletWoman(store);
+    const result = resolveImpStep(store, { targetId: 'p1', chosenSuccessorId: 'p2' });
+    expect(result.events.map((e) => e.type)).toEqual([
+      'NIGHT_KILL_RESOLVED',
+      'DEATH',
+      'DEMON_DIED',
+      'ROLE_CHANGED',
+    ]);
+    expect(result.events.find((e) => e.type === 'ROLE_CHANGED')?.payload).toMatchObject({
+      playerId: 'p2',
+      from: 'poisoner',
+      to: 'imp',
+      reason: 'starpass',
+    });
+    expect(store.getState().players.find((p) => p.id === 'p2')?.characterId).toBe('imp');
+    expect(store.getState().players.find((p) => p.id === 'p1')?.alive).toBe(false);
+    expect(store.getState().victory).toEqual({ status: 'ongoing', reason: null });
+  });
+
+  it('accepts an explicitly declined starpass, which ends the game for good', () => {
+    const store = seeded();
+    toNightThreeImpWithNoScarletWoman(store);
+    // null is "asked and declined", distinct from undefined ("not asked yet") —
+    // the same idiom §16.7's Mayor bounce uses. No successor means no Demon.
+    const result = resolveImpStep(store, { targetId: 'p1', chosenSuccessorId: null });
+    expect(result.events.map((e) => e.type)).toEqual([
+      'NIGHT_KILL_RESOLVED',
+      'DEATH',
+      'DEMON_DIED',
+      'GAME_ENDED',
+    ]);
+    expect(store.getState().victory.status).toBe('good');
+  });
+
+  // FIX 6 — matches `beginNight`'s guard. NOT redundant with the "night still
+  // has steps" check below it: `nextStep` returns null the moment victory is
+  // decided, so on a finished game that check PASSES and, without this guard,
+  // advanceToDay commits PHASE_ADVANCED and puts a decided game on a day screen
+  // (§4.7). Redden by: deleting the victory guard in advanceToDay — the phase
+  // then becomes day 3 and nothing throws.
+  it('refuses to advance to day once the game is decided', () => {
+    const store = seeded();
+    toNightThreeImpWithNoScarletWoman(store);
+    resolveImpStep(store, { targetId: 'p1', chosenSuccessorId: null });
+    expect(store.getState().victory.status).toBe('good');
+    // The night genuinely has no steps left, so the check below this guard
+    // would let it through.
+    expect(nextStep(store.getState())).toBeNull();
+    expect(() => advanceToDay(store)).toThrow(/game is over/i);
+    expect(store.getState().phase).toEqual({ kind: 'night', number: 3 });
   });
 
   it('re-opens the Scarlet Woman notification, which sits earlier in the order (§6.1)', () => {

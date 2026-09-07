@@ -4,6 +4,7 @@ import { playerById } from '../selectors/players';
 import { toRulesView } from '../selectors/rulesView';
 import type { CharacterId, GameState, NoteScope, PlayerId, StatusName } from '../types';
 import type { Store, TransactionResult } from './store';
+import { emitDemonDeath } from './emitDemonDeath';
 
 /**
  * Ids are derived from the log, never from a module counter — §12.8 reloads a game
@@ -154,28 +155,8 @@ export function recordDeath(
       );
       return;
     }
-    if (demonDeath && demonDeath.kind === 'resolved') {
-      tx.emit('DEMON_DIED', {
-        deadDemonId: playerId,
-        aliveCountAtDeath: demonDeath.aliveCountAtDeath,
-        successorId: demonDeath.successorId,
-        successorReason: demonDeath.successorReason,
-      });
-      if (demonDeath.successorId) {
-        const successor = tx.view().players.find((p) => p.id === demonDeath.successorId)!;
-        tx.emit('ROLE_CHANGED', {
-          playerId: successor.id,
-          from: successor.characterId,
-          to: player.characterId,
-          // This is a type narrowing, not a reachable branch: successorReason's
-          // type is 'scarlet_woman' | 'starpass' | null and TypeScript cannot
-          // see that this call site hardcodes starpass: false above.
-          // dayCommands.ts's closeDay and claimSlayer, and nightCommands.ts's
-          // resolveImpStep, repeat the identical idiom at their own call sites
-          // (review round 1, M1) — not restructured here, so all four agree.
-          reason: demonDeath.successorReason === 'starpass' ? 'starpass' : 'scarlet_woman',
-        });
-      }
-    }
+    // The onDemonDeath call above stays here: it owns the pre-death view (§16.1).
+    // Only the emit is shared (emitDemonDeath.ts).
+    if (demonDeath) emitDemonDeath(tx, playerId, player.characterId, demonDeath);
   });
 }

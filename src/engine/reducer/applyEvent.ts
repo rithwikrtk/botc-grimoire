@@ -25,6 +25,7 @@ export function initialState(): GameState {
     redHerringPlayerId: null,
     settledStepIds: new Set<string>(),
     todaysExecutions: [],
+    dayClosed: false,
     nominations: [],
     ruleFlags: [],
     deaths: [],
@@ -284,11 +285,18 @@ export function applyEvent(state: GameState, event: GameEvent): GameState {
         // night -> day transition after a no-execution day.
         todaysExecutions:
           phase.kind === 'day' && state.todaysExecutions.length > 0 ? [] : state.todaysExecutions,
+        // Same rule, same reason: a fresh day has not been closed yet, and
+        // during the night that follows a day this still answers "did that day
+        // close?" (§7). Assigned unconditionally because it is a primitive —
+        // §3.5's referential-identity requirement is about sub-OBJECTS.
+        dayClosed: phase.kind === 'day' ? false : state.dayClosed,
       };
     }
 
     case 'DAY_CLOSED':
-      return state;
+      // §3.5 — an already-closed day is an unchanged state, so hand back the
+      // SAME object rather than a fresh one.
+      return state.dayClosed ? state : { ...state, dayClosed: true };
 
     case 'NIGHT_STEP_RESOLVED': {
       const { stepId, actorIds, chosenAnswer, answerClass } = event.payload;

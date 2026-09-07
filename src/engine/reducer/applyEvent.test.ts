@@ -218,6 +218,37 @@ describe('applyEvent — envelope and roster', () => {
     });
   });
 
+  // The state record behind closeDay's re-entrancy guard (§7). Before this,
+  // DAY_CLOSED was `return state` — a pure no-op — so NOTHING in GameState said
+  // the day had closed, and a second closeDay executed the runner-up nomination.
+  it('records that the day closed, and clears it when the next day opens', () => {
+    const log = [...fivePlayerLog(), evt('PHASE_ADVANCED', { phase: 'day', number: 1 })];
+    expect(reduce(log).dayClosed).toBe(false);
+
+    const closed = [...log, evt('DAY_CLOSED', {})];
+    expect(reduce(closed).dayClosed).toBe(true);
+
+    // Still true through the night, so "did day 1 close?" is answerable while
+    // the Undertaker is being woken.
+    const atNight = [...closed, evt('PHASE_ADVANCED', { phase: 'night', number: 2 })];
+    expect(reduce(atNight).dayClosed).toBe(true);
+
+    // Cleared on entry into the next day, on the same line as todaysExecutions.
+    const nextDay = [...atNight, evt('PHASE_ADVANCED', { phase: 'day', number: 2 })];
+    expect(reduce(nextDay).dayClosed).toBe(false);
+  });
+
+  // §3.5 — a duplicate DAY_CLOSED changes nothing, so it must hand back the
+  // SAME object rather than a fresh spread.
+  it('returns the identical state for a repeated DAY_CLOSED (§3.5)', () => {
+    const before = reduce([
+      ...fivePlayerLog(),
+      evt('PHASE_ADVANCED', { phase: 'day', number: 1 }),
+      evt('DAY_CLOSED', {}),
+    ]);
+    expect(applyEvent(before, evt('DAY_CLOSED', {}))).toBe(before);
+  });
+
   it('clears todaysExecutions when a new day opens, not when a night opens', () => {
     const log = [
       ...fivePlayerLog(),

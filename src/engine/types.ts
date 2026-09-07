@@ -170,6 +170,19 @@ export interface GameState {
   settledStepIds: ReadonlySet<string>;
   /** A list, not a singular field — a Virgin trigger plus a vote is two (§3.6, §16.5). */
   todaysExecutions: ExecutionRecord[];
+  /**
+   * §7 — whether DAY_CLOSED has landed for the current day. Reset when the next
+   * day opens, on the same line as `todaysExecutions`, so during night N+1 it
+   * still answers "did day N close?".
+   *
+   * Exists because `closeDay` is not idempotent and cannot be made so: it
+   * recomputes the execution from the day's nominations, and after the first
+   * close the top nominee is dead, so `resolveDayExecution`'s `nomineeAlive`
+   * filter promotes the RUNNER-UP and executes them too. Nothing in GameState
+   * used to record that the day had closed, so neither `closeDay` nor Plan 2
+   * could tell. This is the field both of them read.
+   */
+  dayClosed: boolean;
   nominations: Nomination[];
   ruleFlags: RuleFlag[];
   deaths: DeathRecord[];

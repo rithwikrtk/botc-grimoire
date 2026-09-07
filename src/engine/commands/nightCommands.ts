@@ -16,6 +16,7 @@ import type {
   RulesView,
 } from '../types';
 import type { Store, Tx, TransactionResult } from './store';
+import { emitDemonDeath } from './emitDemonDeath';
 
 export interface StepResolution {
   targets?: PlayerId[];
@@ -392,28 +393,9 @@ export function resolveImpStep(store: Store, opts: ImpStepOptions): TransactionR
       cause: 'demon',
     });
 
-    if (demonDeath?.kind === 'resolved') {
-      tx.emit('DEMON_DIED', {
-        deadDemonId: victim.id,
-        aliveCountAtDeath: demonDeath.aliveCountAtDeath,
-        successorId: demonDeath.successorId,
-        successorReason: demonDeath.successorReason,
-      });
-      if (demonDeath.successorId) {
-        const successor = tx.view().players.find((p) => p.id === demonDeath.successorId);
-        if (!successor) {
-          throw new Error(
-            `onDemonDeath named ${demonDeath.successorId} as the successor, but no such player exists`,
-          );
-        }
-        tx.emit('ROLE_CHANGED', {
-          playerId: successor.id,
-          from: successor.characterId,
-          to: victim.characterId,
-          reason: demonDeath.successorReason === 'starpass' ? 'starpass' : 'scarlet_woman',
-        });
-      }
-    }
+    // The onDemonDeath call above stays here: it owns the pre-death view (§16.1).
+    // Only the emit is shared (emitDemonDeath.ts).
+    if (demonDeath) emitDemonDeath(tx, victim.id, victim.characterId, demonDeath);
   });
 }
 
@@ -421,6 +403,13 @@ export function resolveImpStep(store: Store, opts: ImpStepOptions): TransactionR
 export function advanceToDay(store: Store): TransactionResult {
   const state = store.getState();
   if (state.phase.kind !== 'night') throw new Error('It is not night');
+  // Matches `beginNight`'s guard (dayCommands.ts). Not redundant with the
+  // step check below: `nextStep` returns null the moment victory is decided, so
+  // on a finished game "the night still has steps" PASSES and the phase would
+  // advance, putting a decided game on a day screen (§4.7).
+  if (state.victory.status !== 'ongoing') {
+    throw new Error('The game is over — there is no next day');
+  }
   if (nextStep(state) !== null) {
     throw new Error('The night still has steps to resolve');
   }

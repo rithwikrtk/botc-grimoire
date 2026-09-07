@@ -15,6 +15,7 @@ import { registrationInconsistency } from '../selectors/registrationLedger';
 import { toRulesView } from '../selectors/rulesView';
 import type { GameState, PlayerId, VictoryReason } from '../types';
 import type { Store, Tx, TransactionResult } from './store';
+import { emitDemonDeath } from './emitDemonDeath';
 
 /**
  * Derived from the log, never from module state. §12.8 reloads a game from its
@@ -118,6 +119,29 @@ export function closeNomination(store: Store, nominationId: string): Transaction
 export function closeDay(store: Store): TransactionResult {
   const state = store.getState();
   if (state.phase.kind !== 'day') throw new Error('It is not day');
+  if (state.victory.status !== 'ongoing') {
+    throw new Error('The game is over — there is no day left to close');
+  }
+  // CRITICAL. `closeDay` is NOT idempotent, and cannot be: it recomputes the
+  // execution from the day's nominations every time. After the first close the
+  // top nominee is dead, so `resolveDayExecution`'s `nomineeAlive` filter drops
+  // them and the RUNNER-UP becomes the unique highest — a second EXECUTION and
+  // DEATH out of one day's votes, a phantom `todaysExecutions` entry the
+  // Undertaker reads that night, §4.7 row 4 suppressed, and on a Saint
+  // runner-up row 2 hands evil the game. Verified before this guard existed:
+  // two nominations at 7 alive (5 votes and 4, threshold 4) killed p2 on the
+  // first close and p5 on the second.
+  //
+  // Note that the victory guard above does NOT cover this — in that scenario
+  // the game is still ongoing. The two guards refuse different things.
+  //
+  // Like the phase check, this is malformed input from the app layer, not a
+  // table rule break: nothing has happened to anyone, so §4.8's "never block"
+  // does not apply and it throws (the same line already drawn by `beginNight`,
+  // `assignRoles` and the Mayor-bounce throws in demonKill.ts).
+  if (state.dayClosed) {
+    throw new Error('This day has already been closed — call beginNight to open the next night (§7)');
+  }
   const execution = resolveDayExecution(state);
 
   return store.transaction(
@@ -144,32 +168,9 @@ export function closeDay(store: Store): TransactionResult {
           executionKind: 'vote',
         });
 
-        if (demonDeath && demonDeath.kind === 'resolved') {
-          tx.emit('DEMON_DIED', {
-            deadDemonId: victim.id,
-            aliveCountAtDeath: demonDeath.aliveCountAtDeath,
-            successorId: demonDeath.successorId,
-            successorReason: demonDeath.successorReason,
-          });
-          if (demonDeath.successorId) {
-            const successor = tx.view().players.find((p) => p.id === demonDeath.successorId)!;
-            tx.emit('ROLE_CHANGED', {
-              playerId: successor.id,
-              from: successor.characterId,
-              to: victim.characterId,
-              // The 'starpass' arm is unreachable THROUGH THIS CALL SITE — the
-              // onDemonDeath call above hardcodes `starpass: false`, so
-              // successorReason here is always 'scarlet_woman'. Kept as a real
-              // branch anyway: this is a type narrowing, not dead code —
-              // successorReason's type is 'scarlet_woman' | 'starpass' | null and
-              // TypeScript cannot see the local invariant — and Tasks 15/17 repeat
-              // this identical idiom at their own starpass-capable call sites, so
-              // trimming it here would leave three call sites disagreeing
-              // (review round 1, comment-only note).
-              reason: demonDeath.successorReason === 'starpass' ? 'starpass' : 'scarlet_woman',
-            });
-          }
-        }
+        // The onDemonDeath call above stays here: it owns the pre-death view
+        // (§16.1). Only the emit is shared (emitDemonDeath.ts).
+        if (demonDeath) emitDemonDeath(tx, victim.id, victim.characterId, demonDeath);
       }
     },
     { dayClosed: true },
@@ -341,26 +342,8 @@ export function claimSlayer(
       cause: 'slayer',
     });
 
-    if (demonDeath && demonDeath.kind === 'resolved') {
-      tx.emit('DEMON_DIED', {
-        deadDemonId: targetId,
-        aliveCountAtDeath: demonDeath.aliveCountAtDeath,
-        successorId: demonDeath.successorId,
-        successorReason: demonDeath.successorReason,
-      });
-      if (demonDeath.successorId) {
-        const successor = tx.view().players.find((p) => p.id === demonDeath.successorId)!;
-        tx.emit('ROLE_CHANGED', {
-          playerId: successor.id,
-          from: successor.characterId,
-          to: target.characterId,
-          // This is a type narrowing, not a reachable branch: successorReason's
-          // type is 'scarlet_woman' | 'starpass' | null and TypeScript cannot see
-          // that a successor always carries a reason (Task 14 repeats this
-          // identical idiom at its own call site).
-          reason: demonDeath.successorReason === 'starpass' ? 'starpass' : 'scarlet_woman',
-        });
-      }
-    }
+    // The onDemonDeath call above stays here: it owns the pre-death view (§16.1).
+    // Only the emit is shared (emitDemonDeath.ts).
+    if (demonDeath) emitDemonDeath(tx, targetId, target.characterId, demonDeath);
   });
 }

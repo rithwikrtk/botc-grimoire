@@ -363,6 +363,110 @@ describe('day commands (§4.8, §7)', () => {
     expect(() => beginNight(store)).toThrow(/game is over/i);
   });
 
+  /**
+   * CRITICAL — a second `closeDay` on the same day used to execute the RUNNER-UP.
+   *
+   * `closeDay` recomputes the execution from the day's nominations every time it
+   * is called, and `resolveDayExecution` filters out nominees who are already
+   * dead. After the first close the top nominee is dead, so the filter drops
+   * them and the second-highest tally becomes the unique highest and meets its
+   * frozen threshold — a second EXECUTION and DEATH out of one day's votes.
+   *
+   * The consequences are not confined to the extra corpse: `todaysExecutions`
+   * gains an entry the Undertaker reads that night, §4.7 row 4 is suppressed,
+   * and if the runner-up is the Saint, row 2 hands evil the game. Nothing in
+   * GameState recorded that the day had closed, so neither the command nor
+   * Plan 2 could tell. `state.dayClosed` is that record.
+   *
+   * This is NOT covered by the victory guard: the game is still ongoing here.
+   */
+  describe('closing the same day twice (§7)', () => {
+    /** Two closed nominations: p2 on 5 votes, p6 on 4. Threshold at 7 alive is 4. */
+    function twoQualifyingNominations(store: Store): void {
+      const a = nominate(store, 'p4', 'p2');
+      for (const voterId of ['p3', 'p4', 'p5', 'p6', 'p7']) castVote(store, a.nominationId, voterId);
+      closeNomination(store, a.nominationId);
+      const b = nominate(store, 'p5', 'p6');
+      for (const voterId of ['p1', 'p2', 'p3', 'p4']) castVote(store, b.nominationId, voterId);
+      closeNomination(store, b.nominationId);
+    }
+
+    /**
+     * Split from the throw assertion below on purpose. `.toThrow` short-circuits
+     * everything after it, so a single test would only ever report the missing
+     * throw — and the missing throw is not the defect. THIS is the defect: a
+     * second player dies from one day's votes. Redden by deleting the
+     * `if (state.dayClosed) throw` guard in closeDay.
+     */
+    it('does not execute the runner-up when the day is closed a second time', () => {
+      const store = seeded();
+      twoQualifyingNominations(store);
+      closeDay(store);
+      // The first close is the legitimate one: the top tally is executed.
+      expect(store.getState().players.find((p) => p.id === 'p2')?.alive).toBe(false);
+      expect(store.getState().victory.status).toBe('ongoing');
+      const eventsBefore = store.getEvents().length;
+
+      // Attempted, not asserted: whether it throws is the sibling test's job.
+      try {
+        closeDay(store);
+      } catch {
+        /* the guard did its job */
+      }
+
+      // p6 is the runner-up: 4 votes against a frozen threshold of 4, and the
+      // only qualifying nomination left once p2 is dead.
+      expect(store.getState().players.find((p) => p.id === 'p6')?.alive).toBe(true);
+      expect(store.getState().todaysExecutions.map((e) => e.playerId)).toEqual(['p2']);
+      expect(store.getState().deaths).toHaveLength(1);
+      expect(store.getEvents().length).toBe(eventsBefore);
+    });
+
+    it('refuses the second close outright', () => {
+      const store = seeded();
+      twoQualifyingNominations(store);
+      closeDay(store);
+      expect(store.getState().dayClosed).toBe(true);
+      expect(() => closeDay(store)).toThrow(/already been closed/i);
+    });
+
+    it('closes the next day normally once the night has been begun', () => {
+      const store = seeded();
+      closeDay(store);
+      expect(store.getState().dayClosed).toBe(true);
+      beginNight(store);
+      // Still true through the night, so the log can answer "did day 1 close?".
+      expect(store.getState().dayClosed).toBe(true);
+      store.transaction('to day 2', (tx) => {
+        tx.emit('PHASE_ADVANCED', { phase: 'day', number: 2 });
+      });
+      expect(store.getState().dayClosed).toBe(false);
+      expect(() => closeDay(store)).not.toThrow();
+      expect(store.getState().dayClosed).toBe(true);
+    });
+
+    it('is undoable — undoing the close makes the day closable again', () => {
+      const store = seeded();
+      closeDay(store);
+      store.undo();
+      expect(store.getState().dayClosed).toBe(false);
+      expect(() => closeDay(store)).not.toThrow();
+    });
+  });
+
+  // Matches `beginNight`'s existing guard directly above. Ordered before the
+  // already-closed check inside closeDay, so this reddens (with a DIFFERENT
+  // message) if the victory guard alone is removed.
+  it('refuses to close a day once the game is decided', () => {
+    const store = seededWithSaint();
+    const { nominationId } = nominate(store, 'p4', 'p3');
+    for (const voterId of ['p4', 'p5', 'p6', 'p7']) castVote(store, nominationId, voterId);
+    closeNomination(store, nominationId);
+    closeDay(store);
+    expect(store.getState().victory.status).toBe('evil');
+    expect(() => closeDay(store)).toThrow(/game is over/i);
+  });
+
   it('ends an abandoned game so the reason has a producer (§7)', () => {
     const store = seeded();
     endGame(store, 'evil', 'abandoned');
