@@ -20,6 +20,7 @@ import {
   resolveStep,
   skipStep,
   type Store,
+  type TransactionResult,
 } from '@/engine';
 
 /**
@@ -64,21 +65,20 @@ function newGame(): Store {
 }
 
 /** Resolves the current step whether or not it computes an answer. */
-function takeCanonicalOrConfirm(store: Store): void {
+function takeCanonicalOrConfirm(store: Store): TransactionResult {
   const position = nextStep(store.getState());
   if (!position) throw new Error('no current step');
   if (position.step.resolverId !== null && position.actor !== null) {
-    takeCanonical(store);
-    return;
+    return takeCanonical(store);
   }
-  resolveStep(store, { chosenAnswer: 'shown', answerClass: 'canonical' });
+  return resolveStep(store, { chosenAnswer: 'shown', answerClass: 'canonical' });
 }
 
 /** Takes the canonical answer for whatever step the cursor is on. */
-function takeCanonical(store: Store, targets?: string[]): void {
+function takeCanonical(store: Store, targets?: string[]): TransactionResult {
   const [canonical] = candidatesForCurrentStep(store, targets);
   if (!canonical) throw new Error('no canonical answer for the current step');
-  resolveStep(store, {
+  return resolveStep(store, {
     ...(targets ? { targets } : {}),
     answerKey: canonical.key,
     answerClass: 'canonical',
@@ -172,14 +172,29 @@ describe('a full scripted game (§14 Tier 3)', () => {
     // R18 — a length says nothing about expiry, and p5 is this fixture's
     // redHerring, whose permanent entry the reducer writes at ROLES_ASSIGNED,
     // so a bare length check is green before a single night step runs. Assert
-    // the predicate AND the entry's persistence: the poison applied on night 1
-    // has expired by night 2 (§4.4's inclusive comparison — night 2 is past the
-    // day-1 boundary), but the ledger entry is still there.
+    // the predicate AND the entry's persistence instead: by night 2, the
+    // poison applied on night 1 reads as expired (`isPoisoned` false) while its
+    // ledger entry is still present — entries persist, the predicate is what
+    // moves. (This pair does not itself witness §4.4's inclusive `<=`
+    // comparison at the boundary — flipping it to `<` does not redden this
+    // assertion, per fix round 1; that boundary is covered separately by the
+    // Mayor-poison test pair below.)
     const p5AtNight2 = store.getState().players.find((p) => p.id === 'p5')!;
     expect(isPoisoned(p5AtNight2, store.getState().phase)).toBe(false);
     expect(p5AtNight2.statusLedger.some((s) => s.status === 'poisoned')).toBe(true);
 
     // ---- Night 2: the Monk protects, the Imp kills elsewhere ----
+    // Fix round 1, folded minor (e) — the Monk's STATUS_APPLIED is emitted
+    // here, but the Imp never targets the protected player (p9) anywhere in
+    // this script, and nothing here reads `isProtected`, so this arc does NOT
+    // witness protection actually blocking a kill. Deleting this handler's
+    // STATUS_APPLIED would leave the whole file green. That coverage is real,
+    // just not here: src/engine/commands/nightCommands.test.ts's 'records a
+    // blocked kill with no death' resolves a Monk protection then an Imp kill
+    // against the same target and asserts `finalVictimId: null` and
+    // `resolutionChain: [{ result: 'monk_protected' }]`. Not duplicated here
+    // because moving a scripted kill to target p9 would break the alive-count
+    // arithmetic every later day's execution threshold depends on.
     const night2 = runNight(store, {
       monk: () =>
         resolveStep(store, { targets: ['p9'], chosenAnswer: 'P9 protected', answerClass: 'canonical' }),
@@ -250,8 +265,14 @@ describe('a full scripted game (§14 Tier 3)', () => {
     closeDay(store);
 
     expect(store.getState().victory).toEqual({ status: 'good', reason: 'demon_dead' });
-    // §4.7 — the night cannot continue past the end of the game.
+    // The phase is DAY 4 here, so `nextStep` returning null is already
+    // guaranteed by the phase check alone (`nextStep` only ever returns
+    // non-null during a night) — it does not by itself witness §4.7's "the
+    // night cannot continue past the end of the game". Kept as a sanity check,
+    // but the real witness is `beginNight` refusing to open a next night at
+    // all now that the game is decided (fix round 1, folded minor (c)).
     expect(nextStep(store.getState())).toBeNull();
+    expect(() => beginNight(store)).toThrow(/game is over/i);
   });
 
   it('leaves a log that replays to the same state and undoes to nothing', () => {
@@ -298,7 +319,14 @@ describe('a full scripted game (§14 Tier 3)', () => {
 
     // Her notification re-opens, which is intended and non-monotonic (§6.1)...
     expect(nextStep(store.getState())?.step.id).toBe('scarlet_woman_notify');
-    takeCanonicalOrConfirm(store);
+    // Fix round 1, FIX 2 — §4.1's per-actor stamping had no witness anywhere in
+    // the tree: `scarlet_woman_notify` is the ONE step in the whole night order
+    // where the step id is not itself a valid character id, so it is the only
+    // place a `perceivedCharacterId: position.step.id` regression in
+    // nightCommands.ts can be caught. The promoted p3's true AND perceived
+    // character is `imp`, not `scarlet_woman_notify`.
+    const notifyResult = takeCanonicalOrConfirm(store);
+    expect(notifyResult.events[0]?.payload).toMatchObject({ perceivedCharacterId: 'imp' });
 
     // ...but the Imp step must NOT come back round.
     const remaining: string[] = [];

@@ -202,8 +202,14 @@ describe('answer classes (§4.3)', () => {
     ).not.toThrow();
   });
 
-  // §4.1 — the field must carry a character id, not a step id.
-  it("stamps the actor's perceived character, never the step id", () => {
+  // §4.1 — the field carries the actor's perceived character. Fix round 1,
+  // FIX 2 — this is a POSITIVE case only, not a witness against the
+  // `position.step.id` regression: 'empath' is simultaneously the step id and
+  // the character id here, so this assertion is green under either. The real
+  // witness for that regression is `scarlet_woman_notify` — the one step
+  // where the two differ — asserted in test/scripted/fullGame.test.ts's
+  // mid-night-promotion test.
+  it("stamps the actor's perceived character", () => {
     const store = seeded();
     walkTo(store, 'empath');
     const [first] = candidatesForCurrentStep(store);
