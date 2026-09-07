@@ -2,6 +2,8 @@ import { describe, expect, it } from 'vitest';
 import { createStore, type Store } from './store';
 import { assignRoles, beginFirstNight, createGame } from './setupCommands';
 import { addNote, changeRole, clearStatus, recordDeath } from './correctionCommands';
+import type { GameEvent } from '../events';
+import type { TransactionResult } from './store';
 
 const ROLES: Array<[string, string]> = [
   ['p1', 'imp'],
@@ -44,7 +46,16 @@ describe('addNote (§3.4)', () => {
     expect(notes[0]?.id).toBeTruthy();
   });
 
-  it('does not reuse a note id after a reload', () => {
+  // Review round 1, I2: this does NOT witness reload-safety across a process
+  // restart — createStore here runs in the same module instance as `store`, so
+  // even a naive module-level counter (the thing §12.8's docstring warns
+  // about) would still survive this call and hand out a unique id; that
+  // regression is only observable across an actual process restart, which
+  // nothing in this suite performs. What this DOES witness: a producer that
+  // reissues a fixed/constant id, ignoring prior state, collides across two
+  // Store instances built from the same log. See the next test for the one
+  // that pins nextNoteId's collision guard itself.
+  it('gives a second Store built from the same log a distinct next id', () => {
     const store = seeded();
     addNote(store, 'game', 'first');
     const reloaded = createStore(store.getEvents());
@@ -53,10 +64,46 @@ describe('addNote (§3.4)', () => {
     expect(new Set(ids).size).toBe(ids.length);
   });
 
+  // Review round 1, I2: the discriminating case for nextNoteId's `taken.has`
+  // guard is a non-dense note log. Seed a log holding note1 and note3 (a gap —
+  // as could arise from an undo of a run that added note1, note2, note3, then
+  // note2 alone was somehow removed, or any other non-contiguous history);
+  // `state.notes.length + 1` alone would compute note3 and collide with the
+  // existing one. The `taken` check is what skips past it.
+  it('does not collide with an existing id when the note log has a gap', () => {
+    let seq = 0;
+    const e = <T extends GameEvent['type']>(
+      type: T,
+      payload: Extract<GameEvent, { type: T }>['payload'],
+    ): GameEvent => ({ seq: seq++, txId: 'tx1', ts: 1_700_000_000_000 + seq, type, payload }) as GameEvent;
+    const seedEvents: GameEvent[] = [
+      e('NOTE_ADDED', { id: 'note1', scope: 'game', text: 'a' }),
+      e('NOTE_ADDED', { id: 'note3', scope: 'game', text: 'b' }),
+    ];
+    const store = createStore(seedEvents);
+    addNote(store, 'game', 'c');
+    const ids = store.getState().notes.map((n) => n.id);
+    expect(ids).toEqual(['note1', 'note3', 'note4']);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
   it('attaches a player note to that player', () => {
     const store = seeded();
     addNote(store, 'player', 'claimed Empath loudly on day 1', 'p6');
     expect(store.getState().notes[0]).toMatchObject({ scope: 'player', playerId: 'p6' });
+  });
+
+  // Review round 1, M2: matches the malformed-input treatment used throughout
+  // this file (unknown player ids) and elsewhere in the engine (assignRoles,
+  // the Mayor bounce, castVote).
+  it('refuses a player-scoped note with no playerId', () => {
+    const store = seeded();
+    expect(() => addNote(store, 'player', 'no target')).toThrow(/playerId/);
+  });
+
+  it('refuses a note for an unknown playerId', () => {
+    const store = seeded();
+    expect(() => addNote(store, 'player', 'ghost', 'p99')).toThrow(/Unknown player id/);
   });
 });
 
@@ -72,7 +119,26 @@ describe('clearStatus (§3.4, §4.4)', () => {
         expiresAt: { kind: 'day', number: 1 },
       }),
     );
+    // Review round 1, M5: without this, the assertion below would pass
+    // vacuously if the fixture ever stopped applying the status at all.
+    expect(store.getState().players.find((p) => p.id === 'p4')?.statusLedger).toHaveLength(1);
     clearStatus(store, 'p4', 'poisoned', 'p2');
+    expect(store.getState().players.find((p) => p.id === 'p4')?.statusLedger).toEqual([]);
+  });
+
+  // Review round 1, M2: matches changeRole/recordDeath's treatment of an
+  // unknown player id — thrown, not a silent no-op.
+  it('refuses an unknown playerId', () => {
+    const store = seeded();
+    expect(() => clearStatus(store, 'p99', 'poisoned', 'p2')).toThrow(/Unknown player id/);
+  });
+
+  // Review round 1, M2: deliberately the opposite ruling — a status/source
+  // pair that matches nothing in the ledger is a legitimate no-op, not a
+  // malformed-input case, so it must NOT throw and must NOT be blocked.
+  it('does not refuse clearing a status that was never applied', () => {
+    const store = seeded();
+    expect(() => clearStatus(store, 'p4', 'poisoned', 'p2')).not.toThrow();
     expect(store.getState().players.find((p) => p.id === 'p4')?.statusLedger).toEqual([]);
   });
 });
@@ -145,5 +211,38 @@ describe('recordDeath (§18)', () => {
     ]);
     expect(store.getState().players.find((p) => p.id === 'p3')?.characterId).toBe('imp');
     expect(store.getState().victory).toEqual({ status: 'ongoing', reason: null });
+  });
+
+  // Review round 1, I1 — a double-tap on an already-dead non-Demon must be
+  // recorded and flagged, not a silent no-op (applyDeath's own comment says
+  // "recorded and flagged", but nothing produced the flag before this fix).
+  it('flags, rather than silently no-ops, a second death for an already-dead non-Demon', () => {
+    const store = seeded();
+    recordDeath(store, 'p6', 'other');
+    const result = recordDeath(store, 'p6', 'other');
+    expect(result.events.map((e) => e.type)).toEqual(['DEATH', 'RULE_FLAGGED']);
+    expect(store.getState().ruleFlags[0]).toMatchObject({
+      rule: 'target_dead',
+      class: 'integrity',
+    });
+    expect(store.getState().deaths.filter((d) => d.playerId === 'p6')).toHaveLength(1);
+  });
+
+  // Review round 1, I1 — the same double-tap on an already-dead Demon must
+  // not throw onDemonDeath's §16.1 precondition (that throw is for a
+  // different caller mistake — passing the post-DEATH view), and must not
+  // produce a second promotion.
+  it('flags, rather than throwing or re-promoting, a second death for an already-dead Demon', () => {
+    const store = seeded();
+    recordDeath(store, 'p1', 'other');
+    let result: TransactionResult | undefined;
+    expect(() => {
+      result = recordDeath(store, 'p1', 'other');
+    }).not.toThrow();
+    expect(result!.events.map((e) => e.type)).toEqual(['DEATH', 'RULE_FLAGGED']);
+    expect(result!.events[1]).toMatchObject({ payload: { rule: 'target_dead', class: 'integrity' } });
+    const demonDiedCount = store.getEvents().filter((e) => e.type === 'DEMON_DIED').length;
+    expect(demonDiedCount).toBe(1);
+    expect(store.getState().players.find((p) => p.id === 'p3')?.characterId).toBe('imp');
   });
 });
