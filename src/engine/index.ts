@@ -105,6 +105,7 @@ export {
   type OverviewRow,
 } from './selectors/nightCursor';
 export { priorRulings, registrationInconsistency } from './selectors/registrationLedger';
+export { answersAtSeq } from './selectors/replay';
 export { toRulesView } from './selectors/rulesView';
 export { abilityFunctional, isDrunk } from './selectors/predicates';
 // §4.1 — perceivedCharacterId and playersWithPerceivedCharacter are DELIBERATELY
