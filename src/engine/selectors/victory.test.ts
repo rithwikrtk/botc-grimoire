@@ -1,8 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildGame, type LogBuilder } from '@test/helpers/game';
+import { buildGame, LogBuilder } from '@test/helpers/game';
 import { toRulesView } from '@/engine/selectors/rulesView';
 import { expiryFor } from '@/engine/phase';
-import { checkVictory } from './victory';
+import { checkVictory, victoryDerivation } from './victory';
 
 const ROLES: Array<[string, string]> = [
   ['p1', 'imp'],
@@ -183,5 +183,149 @@ describe('checkVictory (§4.7)', () => {
       status: 'ongoing',
       reason: null,
     });
+  });
+
+  // The `aliveCount === 3` clause was previously unpinned: deleting it left
+  // 29/29 green because every other `dayClosed: true` test happens to sit at
+  // exactly 3 alive. This sits at 4.
+  it('row 4 does not fire at four alive, even with a functional Mayor and no execution', () => {
+    const b = kill(game({ kind: 'day', number: 3 }), ['p3', 'p5', 'p6']);
+    // Alive: p1 (Imp), p2 (Poisoner), p4 (Mayor), p7 (Monk) — four.
+    expect(checkVictory(toRulesView(b.state), { dayClosed: true })).toEqual({
+      status: 'ongoing',
+      reason: null,
+    });
+  });
+
+  // The pre-deal guard actually enforced by checkVictory (characterId === '') —
+  // NOT the `players.length > 0` clauses that used to sit on rows 1 and 3, which
+  // could never fire: seats exist from GAME_CREATED, before ROLES_ASSIGNED ever
+  // runs, so `players.length > 0` was already true by the time either predicate
+  // was reachable. Deleting the real guard here (weakening it to
+  // `players.length === 0`) is what should be checked as a mutation; this test
+  // is what catches it.
+  it('reports ongoing for seats that exist but have not been dealt characters yet', () => {
+    const b = new LogBuilder();
+    b.push('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: [
+        { id: 'p1', name: 'Player 1', seat: 0 },
+        { id: 'p2', name: 'Player 2', seat: 1 },
+      ],
+    });
+    expect(checkVictory(toRulesView(b.state), ongoing)).toEqual({ status: 'ongoing', reason: null });
+  });
+
+  // §4.1 — a Drunk's TRUE character is 'drunk', never the believed character.
+  // Both DEATH events below record the true character, as any real caller must
+  // (§4.1's invariant binds the caller, not just this predicate) — the point is
+  // that the predicate cannot be fooled even when a drunkBelief is attached.
+  it('§4.1 — a Drunk believing they are the Saint does not hand evil a win when executed', () => {
+    const drunkRoles: Array<[string, string]> = [
+      ['p1', 'imp'],
+      ['p2', 'poisoner'],
+      ['p3', 'drunk'],
+      ['p4', 'mayor'],
+      ['p5', 'chef'],
+      ['p6', 'empath'],
+      ['p7', 'monk'],
+    ];
+    const b = buildGame({
+      roles: drunkRoles,
+      drunkBelief: { playerId: 'p3', believesCharacterId: 'saint' },
+      upTo: { kind: 'day', number: 2 },
+    });
+    b.push('DEATH', {
+      playerId: 'p3',
+      characterIdAtDeath: 'drunk',
+      cause: 'execution',
+      executionKind: 'vote',
+    });
+    expect(checkVictory(toRulesView(b.state), ongoing)).toEqual({ status: 'ongoing', reason: null });
+  });
+
+  it('§4.1 — a Drunk believing they are the Mayor does not win the game for good', () => {
+    const drunkRoles: Array<[string, string]> = [
+      ['p1', 'imp'],
+      ['p2', 'poisoner'],
+      ['p3', 'saint'],
+      ['p4', 'drunk'],
+      ['p5', 'chef'],
+      ['p6', 'empath'],
+      ['p7', 'monk'],
+    ];
+    const b = buildGame({
+      roles: drunkRoles,
+      drunkBelief: { playerId: 'p4', believesCharacterId: 'mayor' },
+      upTo: { kind: 'day', number: 3 },
+    });
+    const dying: Array<[string, string]> = [
+      ['p3', 'saint'],
+      ['p5', 'chef'],
+      ['p6', 'empath'],
+      ['p7', 'monk'],
+    ];
+    for (const [id, characterId] of dying) {
+      b.push('DEATH', { playerId: id, characterIdAtDeath: characterId, cause: 'demon' });
+    }
+    // Alive: p1 (Imp), p2 (Poisoner), p4 (Drunk, believes Mayor). No real Mayor.
+    expect(checkVictory(toRulesView(b.state), { dayClosed: true })).toEqual({
+      status: 'ongoing',
+      reason: null,
+    });
+  });
+});
+
+describe('victoryDerivation (§8.2 — show your working)', () => {
+  it('renders an ongoing game', () => {
+    const b = game({ kind: 'night', number: 1 });
+    const view = toRulesView(b.state);
+    expect(victoryDerivation(view, ongoing)).toEqual([
+      { label: 'alive', detail: 'Player 1 Player 2 Player 3 Player 4 Player 5 Player 6 Player 7 -> 7' },
+      { label: 'holds the Demon', detail: 'Player 1' },
+      { label: 'executed today', detail: 'nobody' },
+      { label: 'Mayor', detail: 'Player 4: alive, ability functional' },
+      { label: 'day closed', detail: 'no' },
+      { label: 'result', detail: 'the game continues' },
+    ]);
+  });
+
+  it('renders a good win with nobody holding the Demon', () => {
+    const b = kill(game({ kind: 'night', number: 2 }), ['p1']);
+    const view = toRulesView(b.state);
+    expect(victoryDerivation(view, ongoing)).toEqual([
+      { label: 'alive', detail: 'Player 2 Player 3 Player 4 Player 5 Player 6 Player 7 -> 6' },
+      { label: 'holds the Demon', detail: 'nobody' },
+      { label: 'executed today', detail: 'nobody' },
+      { label: 'Mayor', detail: 'Player 4: alive, ability functional' },
+      { label: 'day closed', detail: 'no' },
+      { label: 'result', detail: 'good wins — demon_dead' },
+    ]);
+  });
+
+  it('renders an execution in the "executed today" line, and an evil win', () => {
+    const b = kill(game({ kind: 'day', number: 2 }), ['p3'], 'execution');
+    const view = toRulesView(b.state);
+    expect(victoryDerivation(view, ongoing)).toEqual([
+      { label: 'alive', detail: 'Player 1 Player 2 Player 4 Player 5 Player 6 Player 7 -> 6' },
+      { label: 'holds the Demon', detail: 'Player 1' },
+      { label: 'executed today', detail: 'Player 3 (vote)' },
+      { label: 'Mayor', detail: 'Player 4: alive, ability functional' },
+      { label: 'day closed', detail: 'no' },
+      { label: 'result', detail: 'evil wins — saint_executed' },
+    ]);
+  });
+
+  it('renders a closed day and the Mayor\'s good win', () => {
+    const b = kill(game({ kind: 'day', number: 3 }), ['p3', 'p5', 'p6', 'p7']);
+    const view = toRulesView(b.state);
+    expect(victoryDerivation(view, { dayClosed: true })).toEqual([
+      { label: 'alive', detail: 'Player 1 Player 2 Player 4 -> 3' },
+      { label: 'holds the Demon', detail: 'Player 1' },
+      { label: 'executed today', detail: 'nobody' },
+      { label: 'Mayor', detail: 'Player 4: alive, ability functional' },
+      { label: 'day closed', detail: 'yes' },
+      { label: 'result', detail: 'good wins — mayor_no_execution' },
+    ]);
   });
 });

@@ -39,7 +39,22 @@ export default tseslint.config(
         {
           patterns: [
             {
-              group: ['**/selectors/players', '@/engine/selectors/players'],
+              // '**/selectors/players' and the '@/…' alias catch every import that
+              // spells out the 'selectors' segment. Neither catches a file that
+              // already LIVES in src/engine/selectors/ importing its sibling
+              // players.ts via './players' (or '../players' one level down) —
+              // that specifier has no 'selectors' segment in its own text, so the
+              // glob silently doesn't match. Found empirically: eslint on a probe
+              // file importing perceivedCharacterId from './players' produced NO
+              // error under the two patterns above. Listed explicitly because
+              // seating.ts already uses the relative-import idiom in this
+              // directory and more files land here later (§4.1).
+              group: [
+                '**/selectors/players',
+                '@/engine/selectors/players',
+                './players',
+                '../players',
+              ],
               importNames: ['perceivedCharacterId', 'playersWithPerceivedCharacter'],
               message: PERCEIVED_CHARACTER_MESSAGE,
             },

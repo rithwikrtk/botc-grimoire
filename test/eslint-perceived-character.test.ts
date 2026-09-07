@@ -26,6 +26,20 @@ describe('§4.1 enforcement — where perceivedCharacterId may be imported', () 
     expect(messages.join('\n')).toMatch(/no-restricted-imports/);
   });
 
+  // The literal-specifier gap this closes: '**/selectors/players' and the '@/…'
+  // alias both require the text 'selectors' to appear in the import specifier,
+  // which a file that already LIVES in src/engine/selectors/ never writes when
+  // importing its sibling players.ts. Before the fix, this exact case produced
+  // NO error — verified by hand against the real eslint CLI.
+  it('rejects the same-directory relative form (a file inside selectors/ itself)', async () => {
+    const messages = await lint(
+      'src/engine/selectors/victory.ts',
+      `import { perceivedCharacterId } from './players';\nexport const x = perceivedCharacterId;\n`,
+    );
+    expect(messages.join('\n')).toMatch(/no-restricted-imports/);
+    expect(messages.join('\n')).toMatch(/§4\.1/);
+  });
+
   it('allows other imports from the same module', async () => {
     const messages = await lint(
       'src/engine/rules/demonKill.ts',

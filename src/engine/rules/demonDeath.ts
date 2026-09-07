@@ -39,7 +39,13 @@ export const SCARLET_WOMAN_BEATS_STARPASS = true;
  *
  * CONTRACT: `view` must be the state from BEFORE the DEATH event is applied, so
  * aliveCountAtDeath counts the dying Demon. Passing the post-death view turns the
- * Scarlet Woman's threshold from 5 into 6.
+ * Scarlet Woman's threshold from 5 into 6 — enforced below, not just documented:
+ * this throws if `deadDemonId` is already dead in `view` (§16.1).
+ *
+ * `opts.chosenSuccessorId`: `undefined` means not asked yet (may return
+ * `needs_successor_choice`); `null` means the Storyteller was asked and declined
+ * the starpass, so nobody succeeds the Demon; a `PlayerId` must be a living
+ * Minion (other than the dying Demon) or this throws.
  */
 export function onDemonDeath(
   view: RulesView,
@@ -57,6 +63,17 @@ export function onDemonDeath(
       `onDemonDeath called for ${deadDemonId}, whose true character is ${dead.characterId}, not the Demon (§4.6)`,
     );
   }
+  // §16.1's arithmetic contract requires the pre-DEATH view, and that is checkable
+  // right here: in that view the dying Demon is still alive. A caller who passed
+  // the post-death view instead would silently turn the Scarlet Woman's threshold
+  // of 5 into 6 — this converts that mistake into a loud failure at the call site
+  // that made it, rather than a quiet miscount three tasks away.
+  if (!dead.alive) {
+    throw new Error(
+      `onDemonDeath called for ${deadDemonId}, who is already dead in this view — pass the state ` +
+        `from BEFORE the DEATH event is applied, so aliveCountAtDeath counts the dying Demon (§16.1)`,
+    );
+  }
   const count = aliveCount(view);
 
   // §4.6, §16.9 — checked FIRST, including on a starpass: her ability is worded as
@@ -70,12 +87,11 @@ export function onDemonDeath(
       abilityFunctional(view, p),
   );
   const beatsStarpass = opts.scarletWomanBeatsStarpass ?? SCARLET_WOMAN_BEATS_STARPASS;
-  const scarletWomanTriggers = scarletWoman !== undefined && count >= SCARLET_WOMAN_THRESHOLD;
-  if (scarletWomanTriggers && (beatsStarpass || !opts.starpass)) {
+  if (scarletWoman && count >= SCARLET_WOMAN_THRESHOLD && (beatsStarpass || !opts.starpass)) {
     return {
       kind: 'resolved',
       aliveCountAtDeath: count,
-      successorId: scarletWoman!.id,
+      successorId: scarletWoman.id,
       successorReason: 'scarlet_woman',
     };
   }
@@ -106,6 +122,10 @@ export function onDemonDeath(
     return { kind: 'needs_successor_choice', aliveCountAtDeath: count, candidates };
   }
   if (opts.chosenSuccessorId === null) {
+    // The Storyteller was asked and declined the starpass: legal (the Imp's own
+    // ability only says another player "might" become the Demon), and distinct
+    // from `undefined` (not asked yet) — the same undefined/null/id idiom §16.7's
+    // Mayor bounce uses.
     return {
       kind: 'resolved',
       aliveCountAtDeath: count,
@@ -130,14 +150,30 @@ export function onDemonDeath(
  * §8.2 applied to the most contested number in the engine. `aliveCountAtDeath`
  * decides whether the game continues, it counts the dying Demon (§16.1), and
  * without a derivation the Storyteller has no way to check it at the table.
+ *
+ * Takes the same `opts` passed to `onDemonDeath` (any caller producing `outcome`
+ * already has them) so the `needs_successor_choice` line can say WHY the Scarlet
+ * Woman didn't take precedence — she may be entirely absent, present but below
+ * threshold, or present and qualifying but deferring to the starpass under
+ * `scarletWomanBeatsStarpass: false`. Those are three different game states and
+ * flattening them to "no Scarlet Woman" is wrong in the last two.
  */
 export function demonDeathDerivation(
   view: RulesView,
   deadDemonId: PlayerId,
+  opts: { starpass: boolean; scarletWomanBeatsStarpass?: boolean },
   outcome: DemonDeathOutcome,
 ): DerivationLine[] {
   const living = view.players.filter((p) => p.alive);
   const scarletWoman = view.players.find((p) => p.characterId === 'scarlet_woman');
+  const activeScarletWoman = view.players.find(
+    (p) =>
+      p.characterId === 'scarlet_woman' &&
+      p.alive &&
+      p.id !== deadDemonId &&
+      abilityFunctional(view, p),
+  );
+  const beatsStarpass = opts.scarletWomanBeatsStarpass ?? SCARLET_WOMAN_BEATS_STARPASS;
   const lines: DerivationLine[] = [
     {
       label: 'alive at death',
@@ -145,7 +181,7 @@ export function demonDeathDerivation(
         `${living
           .map((p) => `${p.name}${p.id === deadDemonId ? ' (the dying Demon)' : ''}`)
           .join(' ')} -> ${outcome.aliveCountAtDeath}` +
-        `   (the dying Demon counts, §16.1)`,
+        ` (the dying Demon counts, §16.1)`,
     },
     {
       label: 'Scarlet Woman',
@@ -157,9 +193,15 @@ export function demonDeathDerivation(
   ];
 
   if (outcome.kind === 'needs_successor_choice') {
+    const why =
+      activeScarletWoman === undefined
+        ? 'no living, functional Scarlet Woman'
+        : outcome.aliveCountAtDeath < SCARLET_WOMAN_THRESHOLD
+          ? `Scarlet Woman alive, but only ${outcome.aliveCountAtDeath} alive (< ${SCARLET_WOMAN_THRESHOLD})`
+          : `Scarlet Woman qualifies, but SCARLET_WOMAN_BEATS_STARPASS is ${beatsStarpass}`;
     lines.push({
       label: 'result',
-      detail: `starpass with no Scarlet Woman — choose a successor from ${outcome.candidates.length} living Minion(s)`,
+      detail: `starpass, ${why} -> choose a successor from ${outcome.candidates.length} living Minion(s)`,
     });
     return lines;
   }

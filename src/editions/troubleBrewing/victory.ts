@@ -26,6 +26,18 @@ function livingDemon(view: RulesView): RulesViewPlayer | undefined {
 /**
  * §4.7, in precedence order. Row 1 precedes row 3 so a Demon death that brings
  * the count to 2 is a GOOD win.
+ *
+ * These predicates ASSUME a dealt game. `checkVictory` is the single gate that
+ * makes that assumption safe — it returns `ongoing` before any player has a
+ * character (`characterId === ''`), so none of the four ever runs against an
+ * undealt seat. A `players.length > 0` clause on an individual predicate reads
+ * like a second guard but cannot be one: seats exist from `GAME_CREATED`, before
+ * `ROLES_ASSIGNED`, so that check is always true by the time any predicate here
+ * is reachable. Two of these predicates carried that dead clause until a review
+ * caught it (deleting it left 29/29 green) — it is deliberately not restored.
+ * Row 1's `p.team === 'demon'` read stays safe pre-deal regardless (every seat
+ * defaults to `team: 'townsfolk'`), it is simply not the thing preventing an
+ * early win; `checkVictory`'s own guard is.
  */
 export const VICTORY_PREDICATES: readonly VictoryPredicate[] = Object.freeze([
   {
@@ -33,7 +45,7 @@ export const VICTORY_PREDICATES: readonly VictoryPredicate[] = Object.freeze([
     // runs once at commit and not per event (§4.7).
     reason: 'demon_dead',
     winner: 'good',
-    test: (view) => view.players.length > 0 && livingDemon(view) === undefined,
+    test: (view) => livingDemon(view) === undefined,
   },
   {
     // Row 2 — a Saint executed by vote or by a Virgin trigger, ability functional.
@@ -67,7 +79,7 @@ export const VICTORY_PREDICATES: readonly VictoryPredicate[] = Object.freeze([
     // game never, and the looser comparison costs nothing.
     reason: 'two_alive',
     winner: 'evil',
-    test: (view) => view.players.length > 0 && aliveCount(view) <= 2,
+    test: (view) => aliveCount(view) <= 2,
   },
   {
     // Row 4 — only reachable through a day that closed with no execution, which is
@@ -84,4 +96,7 @@ export const VICTORY_PREDICATES: readonly VictoryPredicate[] = Object.freeze([
   },
 ]);
 
-export const ONGOING: Victory = { status: 'ongoing', reason: null };
+// Frozen for the same reason VICTORY_PREDICATES is: this is returned BY REFERENCE
+// from every ongoing checkVictory call, and a caller mutating one result would
+// corrupt every subsequent "ongoing" answer.
+export const ONGOING: Victory = Object.freeze({ status: 'ongoing', reason: null });
