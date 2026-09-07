@@ -1,0 +1,191 @@
+# Blood on the Clocktower — Storyteller App
+## Design Document (DRAFT — under review)
+
+Date: 2026-09-07
+Status: draft, not yet approved
+Edition scope: **Trouble Brewing only**
+
+---
+
+## 1. Problem
+
+Running Trouble Brewing as Storyteller requires holding a large amount of hidden,
+mutable state in your head while performing for a table of players: who is which
+character, who is poisoned or protected right now, what information you gave to
+whom (and whether it was true), who has nominated, who has voted, who has spent a
+dead vote, and what lies you are currently maintaining. A physical Grimoire plus a
+printed night sheet covers part of this, but leaves the Storyteller doing arithmetic
+(Chef pairs, Empath neighbours, vote thresholds) live, under social pressure, and
+leaves no record of what was said.
+
+This app is a **single-user private tool for the Storyteller**, used on a phone or
+laptop during an in-person game. It is not a game client for players. The one
+exception is Spy Mode (§7).
+
+## 2. Confirmed requirements
+
+Settled with the user before this draft:
+
+| Decision | Choice |
+|---|---|
+| Spy grimoire delivery | Same device. A locked-down Spy Mode screen; hand the device over, take it back. |
+| Information generation | App computes the true answer; Storyteller can override with the lie actually told. Both are recorded. |
+| Platform | Static client-side app (React + Vite), state in `localStorage`. No backend, no accounts. |
+| Role assignment | Randomize a legal set, then allow manual edits before locking in. |
+| Day phase | Full nomination and vote tracking, including threshold math. |
+| Event log | Automatic, timestamped, interleaved with typed notes. Never visible in Spy Mode. |
+| Responsive | Mobile and desktop. |
+
+## 3. Architecture: event-sourced core
+
+Game state is a **pure reducer over an append-only event list**:
+
+```
+state = events.reduce(applyEvent, initialState)
+```
+
+Rationale:
+
+- The requested auto-log is not a parallel feature that can drift from state — the
+  event list *is* the log, rendered.
+- Undo is `events.slice(0, -1)`. In a live game the Storyteller will mistap; undo
+  must be one tap and must not be able to desync state from the log.
+- Spy Mode is a *projection* over the objective slice of state. Notes and
+  truthfulness flags are structurally absent from what the Spy projection can
+  render, rather than hidden with CSS.
+
+**Hard rule: the reducer is deterministic and pure.** No `Math.random()`, no
+`Date.now()` inside `applyEvent`. All randomness (role deal, bluff selection, red
+herring, candidate-pair selection) is resolved *before* the event is created and
+stored as literal data on the event. Otherwise undo/replay produces a different
+game than the one that was played.
+
+### 3.1 Event catalogue
+
+```
+GAME_CREATED        { players: [{id, name, seat}] }
+ROLES_ASSIGNED      { assignments: {playerId: characterId},
+                      demonBluffs: [charId, charId, charId] | null,
+                      drunkBelief: {playerId, believesCharacterId} | null,
+                      redHerring: playerId | null }
+PHASE_ADVANCED      { phase: 'night'|'day', number }
+NIGHT_STEP_RESOLVED { stepId, actorId, targets: [playerId],
+                      computedTruth: any, infoGiven: any,
+                      wasTruthful: boolean, reason?: 'poisoned'|'drunk'|'st_choice' }
+STATUS_APPLIED      { playerId, status, sourceId }
+STATUS_CLEARED      { playerId, status }
+DEATH               { playerId, cause: 'demon'|'execution'|'slayer'|'virgin'|'other' }
+ROLE_CHANGED        { playerId, from, to, reason: 'starpass'|'scarlet_woman' }
+NOMINATION_OPENED   { id, nominatorId, nomineeId }
+VOTE_CAST           { nominationId, voterId, usedDeadVote: boolean }
+NOMINATION_CLOSED   { id, tally, threshold, meetsThreshold }
+EXECUTION           { playerId | null }
+NOTE_ADDED          { scope: 'player'|'game', playerId?, text, ts }
+SPY_VIEWED          { at }
+GAME_ENDED          { winner: 'good'|'evil', reason }
+```
+
+### 3.2 Derived state
+
+```
+players[]  { id, name, seat, characterId, alignment, alive,
+             statuses: { poisoned, protected, drunk, isMaster, redHerring },
+             flags:    { deadVoteSpent, virginTriggered, slayerUsed,
+                         nominatedToday, hasNominatedToday } }
+phase      { kind: 'setup'|'night'|'day'|'ended', number }
+nightQueue [] // computed, see §5
+nominations[] // today only
+log[]      // the events themselves, formatted
+```
+
+## 4. Setup flow
+
+1. **Players screen.** Add names, set seating order (order matters for Chef and
+   Empath). Validate 5–15 players; warn below 7 that Minion/Demon info and bluffs
+   do not apply.
+2. **Deal screen.** Show the required distribution for the player count. Draw a
+   legal random set. If the Baron is drawn, apply +2 Outsiders / −2 Townsfolk before
+   dealing. Also resolve: the 3 not-in-play good-character bluffs (7+ players only),
+   the Drunk's believed Townsfolk if the Drunk is in play, and the Fortune Teller's
+   red herring if the Fortune Teller is in play.
+3. **Edit.** Swap any player's character, reroll the whole set, or reroll a single
+   slot. Legality is re-validated on every edit.
+4. **Lock in.** Emits `ROLES_ASSIGNED`. Moves to Night 1.
+
+## 5. Night engine
+
+Night order is **data, not code**: two ordered arrays of step definitions.
+
+```js
+{ id: 'monk',
+  characterId: 'monk',
+  firstNight: false,
+  condition: (s) => inPlayAndAlive(s, 'monk'),
+  prompt: 'Monk: remove previous protection, then choose a player (not self).',
+  targets: 1,
+  compute: (s, targets) => null,
+  apply:  (s, targets) => [{type:'STATUS_APPLIED', status:'protected', ...}] }
+```
+
+At the start of each night the queue is rebuilt from current state, filtering out
+steps whose character is not in play, whose actor is dead, or whose condition is
+unmet. Conditional steps: Minion/Demon info (7+ players only), Scarlet Woman (only
+on the night after promotion), Ravenkeeper (only if they died this night),
+Undertaker (only if an execution occurred today).
+
+Each step screen shows: who to wake, the exact gesture script, target pickers, the
+**computed true answer**, and a prominent banner if the actor is poisoned or drunk,
+with a field to record the false information given instead.
+
+Information the app computes: Washerwoman / Librarian / Investigator candidate
+pairs, Chef adjacent-evil-pair count, Empath alive-neighbour evil count, Fortune
+Teller yes/no including the red herring, Undertaker token, Ravenkeeper token,
+Demon bluffs.
+
+## 6. Day phase
+
+- Announce deaths.
+- Nominations: enforce one nomination made and one received per player per day;
+  dead players may not nominate.
+- Voting: tap each voter. Live tally against threshold = `ceil(alive / 2)`.
+  Dead players have exactly one vote for the game; the app tracks whether it is
+  spent. Butler votes are flagged as conditional on their Master's vote.
+- Execution: the nomination with the highest tally that also meets the threshold.
+  A tie at the top means no execution. The town may decline to execute.
+- Ad-hoc day triggers: Slayer claim (once per player), Virgin trigger.
+
+## 7. Spy Mode
+
+A full-screen projection showing only objective game facts, per §14 of the
+Storyteller guide: seating order, each player's true character, and current status
+markers (poisoned, protected, dead, Butler's Master). It renders from a
+`toSpyView(state)` function whose return type contains no notes, no truthfulness
+flags, and no log.
+
+Entering Spy Mode is an explicit action. Exiting requires a deliberate confirm so a
+stray tap cannot return to the notes view while the Spy is holding the device. Entry
+is recorded as a `SPY_VIEWED` event.
+
+## 8. Notes
+
+Two scopes: per-player notes and general game notes. Used for recording lies told
+under poison/drunk, player misunderstandings, claims made publicly, and general
+read/vibe. Notes interleave with the auto-log in the timeline view. Never rendered
+in Spy Mode.
+
+## 9. Persistence
+
+`localStorage`, single active game plus an archive of finished games. Every event
+appends and autosaves. JSON export/import for backup.
+
+## 10. Testing
+
+Vitest over the reducer and rules engine: distribution legality per player count,
+Baron adjustment, night queue generation for every conditional case, Chef and Empath
+counts including dead-player skipping, vote threshold math at each alive-count, and
+Spy projection containing no private fields.
+
+## 11. Out of scope
+
+Other editions (Bad Moon Rising, Sects & Violets), custom scripts, Travellers,
+Fabled, multiplayer/networked play, accounts.
