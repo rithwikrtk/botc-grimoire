@@ -98,6 +98,11 @@ function rulingKey(prefix: string, rulings: readonly RegistrationRuling[]): stri
     .join(',')}`;
 }
 
+/** "a" before a consonant sound, "an" before a vowel sound (only `outsider` needs it). */
+function articleFor(word: string): string {
+  return /^[aeiou]/i.test(word) ? 'an' : 'a';
+}
+
 /**
  * The Chef counts ALL evil players, alive or dead, so every ambiguous seat in the
  * ring can change the answer — a Recluse adjacent to a Minion is the single most
@@ -170,7 +175,6 @@ function oneOfTwo(
   view: RulesView,
   actorId: PlayerId,
   team: Team,
-  label: string,
   excludePlayerIds: ReadonlySet<PlayerId>,
 ): LegalAnswer[] {
   const answers: LegalAnswer[] = [];
@@ -198,13 +202,13 @@ function oneOfTwo(
           `${team}:${player.id}:${decoy.id}`,
           [shownCharacterId, player.id, decoy.id],
           ruled
-            ? `a ${label} of your choosing: ${player.name} or ${decoy.name}`
+            ? `${articleFor(team)} ${team} of your choosing: ${player.name} or ${decoy.name}`
             : `${characterById(player.characterId).name}: ${player.name} or ${decoy.name}`,
           [
             {
-              label: `${label} in play`,
+              label: `${team} in play`,
               detail: ruled
-                ? `${player.name}, ruled to register as ${team} — choose which ${label} token to show`
+                ? `${player.name}, ruled to register as ${team} — choose which ${team} token to show`
                 : `${characterById(player.characterId).name} (${player.name})`,
             },
             { label: 'decoy', detail: decoy.name },
@@ -236,24 +240,43 @@ export const washerwomanAnswers: Resolver = (view, actorId) => {
   // any future change to how the Drunk registers.
   const excluded = new Set<PlayerId>();
   if (view.drunkBelief) excluded.add(view.drunkBelief.playerId);
-  return oneOfTwo(view, actorId, 'townsfolk', 'townsfolk', excluded);
+  return oneOfTwo(view, actorId, 'townsfolk', excluded);
 };
 
 export const librarianAnswers: Resolver = (view, actorId) => {
   // The Librarian MAY be shown the Drunk — they are a real Outsider (§6.4).
-  const answers = oneOfTwo(view, actorId, 'outsider', 'outsider', new Set());
-  if (answers.length > 0) return answers;
-  // §6.4 — the explicit zero-Outsiders branch.
-  return [
-    answer('librarian:zero', null, 'Zero Outsiders are in play', [
-      { label: 'outsiders in play', detail: 'none' },
-      { label: 'result', detail: 'show the "zero" signal -> 0' },
-    ]),
-  ];
+  const answers = oneOfTwo(view, actorId, 'outsider', new Set());
+
+  // §6.4 — the explicit zero-Outsiders branch. Discriminated by the WORLD (does
+  // any player's TRUE character sit on the outsider team?), never by whether
+  // `answers` happens to be empty: a Spy's {good, outsider} registration option
+  // can make `answers` non-empty even in a legal zero-Outsider game (7/10/13
+  // players), which must never suppress the true "zero Outsiders" answer — that
+  // was the Critical defect this branch fixes.
+  //
+  // The actor is excluded from the check: a Drunk who believes they are the
+  // Librarian wakes at this very step (§4.1 — wakes() reads the perceived
+  // character), and the Drunk's true team IS outsider. Counting the actor's own
+  // seat would suppress the zero answer while `oneOfTwo` (which always excludes
+  // the actor from its own candidates) finds nobody else to offer, leaving an
+  // empty answer set — the same failure one edge over.
+  const hasTrueOutsider = view.players.some(
+    (p) =>
+      p.characterId !== '' &&
+      p.id !== actorId &&
+      characterById(p.characterId).team === 'outsider',
+  );
+  if (hasTrueOutsider) return answers;
+
+  const zeroAnswer = answer('librarian:zero', null, 'Zero Outsiders are in play', [
+    { label: 'outsiders in play', detail: 'none' },
+    { label: 'result', detail: 'show the "zero" signal -> 0' },
+  ]);
+  return [zeroAnswer, ...answers];
 };
 
 export const investigatorAnswers: Resolver = (view, actorId) =>
-  oneOfTwo(view, actorId, 'minion', 'minion', new Set());
+  oneOfTwo(view, actorId, 'minion', new Set());
 
 // ---- yes/no and character answers ----
 
@@ -266,25 +289,39 @@ export const investigatorAnswers: Resolver = (view, actorId) =>
  */
 export const fortuneTellerAnswers: Resolver = (view, _actorId, targets = []) => {
   const chosen = targets.map((id) => playerById(view, id));
+  // The same player chosen twice is off-constraint too — the Fortune Teller must
+  // choose 2 DISTINCT players. Deduped for answer construction so a repeated
+  // target cannot mint two answers sharing one key (§6.2's stable-key contract).
+  const distinctChosen = [...new Map(chosen.map((p) => [p.id, p] as const)).values()];
+  const isOffConstraint = chosen.length !== 2 || distinctChosen.length !== chosen.length;
   const herring = chosen.find((p) => p.id === view.redHerringPlayerId) ?? null;
   const trueDemon = chosen.find((p) => characterById(p.characterId).team === 'demon') ?? null;
 
   const base: DerivationLine[] = [
-    ...(chosen.length !== 2
+    ...(isOffConstraint
       ? [
           {
             label: 'off-constraint',
-            detail: `${chosen.length} player${chosen.length === 1 ? '' : 's'} chosen, not 2 — recorded and flagged (§4.8)`,
+            detail:
+              chosen.length !== 2
+                ? `${chosen.length} player${chosen.length === 1 ? '' : 's'} chosen, not 2 — recorded and flagged (§4.8)`
+                : 'the same player chosen twice, not two distinct players — recorded and flagged (§4.8)',
           },
         ]
       : []),
     { label: 'chosen', detail: chosen.length > 0 ? chosen.map((p) => p.name).join(' · ') : 'nobody' },
-    {
-      label: 'true characters',
-      detail: chosen
-        .map((p) => `${p.name} = ${characterById(p.characterId).name}`)
-        .join(' · '),
-    },
+    // §8.2 derivations are user-facing — omit this line rather than rendering it
+    // with an empty detail when nobody was chosen.
+    ...(chosen.length > 0
+      ? [
+          {
+            label: 'true characters',
+            detail: chosen
+              .map((p) => `${p.name} = ${characterById(p.characterId).name}`)
+              .join(' · '),
+          },
+        ]
+      : []),
     {
       label: 'red herring',
       detail: herring ? `${herring.name} registers as a Demon to the Fortune Teller` : 'not among the chosen',
@@ -312,7 +349,7 @@ export const fortuneTellerAnswers: Resolver = (view, _actorId, targets = []) => 
   // §4.3 — an ambiguous chosen player may be ruled to register as the Demon,
   // which flips a No into a Yes.
   if (!canonicalYes) {
-    for (const player of chosen) {
+    for (const player of distinctChosen) {
       const demonOption = registrationOptionsForCharacterId(player.characterId).find(
         (o) => o.team === 'demon' && characterById(player.characterId).team !== 'demon',
       );
@@ -386,7 +423,14 @@ export const ravenkeeperAnswers: Resolver = (view, _actorId, targets = []) => {
     answers.push(
       answer(
         `ravenkeeper:${target.id}:${option.team}`,
-        target.characterId,
+        // A ruled answer never carries the TRUE character as its value — the
+        // display says "a minion of the Storyteller's choosing", so the value
+        // must show that no token is named yet. `[null, target.id]` matches the
+        // documented tuple contract (types.ts) so the downstream command-layer
+        // guard `Array.isArray(value) && value[0] === null` (which demands an
+        // `stChoice`) actually fires; a bare `null` would type-check but leave
+        // that guard permanently dead, since `Array.isArray(null)` is false.
+        [null, target.id],
         `a ${option.team} of the Storyteller's choosing`,
         [
           { label: 'chosen', detail: target.name },

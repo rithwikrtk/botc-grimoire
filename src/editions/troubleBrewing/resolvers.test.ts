@@ -90,6 +90,8 @@ describe('the Spy registers as good, even dead (guide §1, §4.3)', () => {
       alignment: 'good',
       team: 'outsider',
     });
+    // Article fix: "an outsider", not "a outsider".
+    expect(viaSpy[0]?.display).toMatch(/^an outsider of your choosing:/);
   });
 
   it('still registers after death — registration is not an ability', () => {
@@ -155,7 +157,7 @@ describe('chefAnswers and empathAnswers — the §4.3 cross-product', () => {
     }
   });
 
-  it('changes the Chef count when the Recluse is ruled evil next to the Demon', () => {
+  it('changes the Chef count when the Spy is ruled good, removing an adjacency', () => {
     // p1 Imp, p2 Spy adjacent; p6 Recluse sits between p5 and p7, neither evil.
     const view = toRulesView(nineWithSpy().state);
     const canonical = chefAnswers(view, 'p3')[0]!;
@@ -199,14 +201,31 @@ describe('chefAnswers and empathAnswers — the §4.3 cross-product', () => {
     expect(empathAnswers(view, 'p5')).toHaveLength(1);
   });
 
-  it('keeps answer keys stable across recomputation (§6.2)', () => {
+  it('keeps answer keys stable across independently-reduced views, and unique within one set (§6.2)', () => {
     // §6.2: default selection happens once on step entry, "never during render,
     // or the Washerwoman decoy reshuffles every frame". Stable keys are what let
     // a selection be restored, so they must not depend on iteration order.
-    const view = toRulesView(nineWithSpy().state);
-    for (const resolve of [chefAnswers, washerwomanAnswers, investigatorAnswers]) {
-      const first = resolve(view, 'p3').map((a) => a.key);
-      const second = resolve(view, 'p3').map((a) => a.key);
+    //
+    // The equality check calls the resolver on two SEPARATELY reduced RulesViews
+    // built from the same log (`nineWithSpy()` re-runs the whole event fold), not
+    // twice on the same in-memory view — two calls on one object can never
+    // disagree for a pure function, so that half would be unfalsifiable otherwise.
+    // The uniqueness check is the half that can actually fail, and previously
+    // never ran against the Fortune Teller, which is exactly the resolver whose
+    // duplicate-key bug (a target chosen twice) this suite now separately covers.
+    const configs: Array<{
+      resolve: typeof chefAnswers;
+      actorId: string;
+      targets?: readonly string[];
+    }> = [
+      { resolve: chefAnswers, actorId: 'p3' },
+      { resolve: washerwomanAnswers, actorId: 'p3' },
+      { resolve: investigatorAnswers, actorId: 'p3' },
+      { resolve: fortuneTellerAnswers, actorId: 'p8', targets: ['p6', 'p3'] },
+    ];
+    for (const { resolve, actorId, targets } of configs) {
+      const first = resolve(toRulesView(nineWithSpy().state), actorId, targets).map((a) => a.key);
+      const second = resolve(toRulesView(nineWithSpy().state), actorId, targets).map((a) => a.key);
       expect(second).toEqual(first);
       expect(new Set(first).size).toBe(first.length);
     }
@@ -234,13 +253,12 @@ describe('washerwomanAnswers (§6.4)', () => {
   it('never shows the Drunk as their believed Townsfolk', () => {
     const view = toRulesView(nine().state);
     for (const answer of washerwomanAnswers(view, 'p3')) {
-      const [characterId, a, b] = answer.value as readonly string[];
+      const [characterId] = answer.value as readonly string[];
       expect(characterId).not.toBe('monk');
       if (characterId) {
         const holder = view.players.find((p) => p.characterId === characterId)!;
         expect(holder.id).not.toBe('p7');
       }
-      expect([a, b]).not.toContain(undefined);
     }
   });
 
@@ -286,9 +304,65 @@ describe('librarianAnswers (§6.4)', () => {
 
   it('offers the Recluse as an Outsider only under its true registration', () => {
     const view = toRulesView(nine().state);
-    // The Recluse IS an Outsider, so it is a legal canonical Librarian answer.
-    const shown = librarianAnswers(view, 'p4').map((a) => (a.value as readonly string[])[0]);
-    expect(shown).toContain('recluse');
+    // The Recluse IS an Outsider, so it is a legal canonical Librarian answer
+    // (one per decoy). There is no OTHER way for a Recluse to register as an
+    // Outsider, so every answer showing it must be `canonical` — none may be
+    // `registration`-class, which is the exclusivity the title claims.
+    const viaRecluse = librarianAnswers(view, 'p4').filter(
+      (a) => (a.value as readonly string[])[0] === 'recluse',
+    );
+    expect(viaRecluse.length).toBeGreaterThan(0);
+    for (const a of viaRecluse) {
+      expect(a.answerClass).toBe('canonical');
+      expect(a.registrationRulings).toEqual([]);
+    }
+  });
+
+  // FIX 1 (Critical) — the zero-Outsiders branch must be discriminated by the
+  // WORLD (a true Outsider actually dealt), never by whether the answer list
+  // happens to be non-empty. A Spy's {good, outsider} registration option makes
+  // `oneOfTwo` non-empty even in a legal zero-Outsider game (7 players here),
+  // which must not make the true "zero Outsiders" answer vanish.
+  it('keeps the true zero-Outsiders answer present and first even with a Spy in play', () => {
+    const view = toRulesView(
+      buildGame({
+        roles: [
+          ['p1', 'imp'], ['p2', 'spy'], ['p3', 'librarian'], ['p4', 'chef'],
+          ['p5', 'empath'], ['p6', 'monk'], ['p7', 'soldier'],
+        ],
+      }).state,
+    );
+    const answers = librarianAnswers(view, 'p3');
+    // The Spy's registration options still produce answers alongside the zero one.
+    expect(answers.length).toBeGreaterThan(1);
+    expect(answers[0]?.value).toBeNull();
+    expect(answers[0]?.display).toMatch(/zero/i);
+    expect(answers[0]?.answerClass).toBe('canonical');
+    expect(answers.slice(1).every((a) => a.answerClass === 'registration')).toBe(true);
+  });
+
+  // FIX 1 correction — the actor themselves must be excluded from the
+  // "is there a true Outsider" check. A Drunk who believes they are the
+  // Librarian wakes at this very step (§4.1), and the Drunk's true team IS
+  // outsider. Without the exclusion, `hasTrueOutsider` would be true (so no
+  // zero answer is prepended) while `oneOfTwo` excludes the actor from its own
+  // candidates and finds nobody else — an empty answer set, the same failure
+  // one edge over.
+  it('still offers the zero-Outsiders answer when the only true Outsider is the actor themselves (a Drunk believing they are the Librarian)', () => {
+    const view = toRulesView(
+      buildGame({
+        roles: [
+          ['p1', 'imp'], ['p2', 'poisoner'], ['p3', 'washerwoman'], ['p4', 'chef'],
+          ['p5', 'empath'], ['p6', 'drunk'],
+        ],
+        drunkBelief: { playerId: 'p6', believesCharacterId: 'librarian' },
+      }).state,
+    );
+    const answers = librarianAnswers(view, 'p6');
+    expect(answers).not.toHaveLength(0);
+    expect(answers[0]?.value).toBeNull();
+    expect(answers[0]?.display).toMatch(/zero/i);
+    expect(answers[0]?.answerClass).toBe('canonical');
   });
 });
 
@@ -321,9 +395,37 @@ describe('investigatorAnswers (§4.3, §6.4)', () => {
   it('puts the canonical answers before the registration ones', () => {
     const view = toRulesView(nine().state);
     const classes = investigatorAnswers(view, 'p5').map((a) => a.answerClass);
+    // Unconditional: `classes[0]` must be canonical, full stop. The previous form
+    // — `slice(0, indexOf('registration')).every(...)` — passes vacuously
+    // (`slice(0, 0)` is `[]`) on exactly the one shape that matters: a set with
+    // NO canonical answer at all, where `indexOf` returns 0.
+    expect(classes[0]).toBe('canonical');
+    // Properly partitioned: no `canonical` appears after any `registration`.
     const firstRegistration = classes.indexOf('registration');
     if (firstRegistration !== -1) {
-      expect(classes.slice(0, firstRegistration).every((c) => c === 'canonical')).toBe(true);
+      expect(classes.slice(firstRegistration).every((c) => c === 'registration')).toBe(true);
+    }
+  });
+
+  // FIX 3 — this is the genuine witness the vacuous form above could never be:
+  // run the same unconditional ordering assertion over the exact broken shape
+  // FIX 1 produced (a Librarian zero-Outsiders answer set with a Spy in play,
+  // where the canonical zero answer used to be entirely absent, leaving
+  // `classes[0] === 'registration'`).
+  it('puts the canonical zero-Outsiders answer first even in the Spy-in-play set that FIX 1 repairs', () => {
+    const view = toRulesView(
+      buildGame({
+        roles: [
+          ['p1', 'imp'], ['p2', 'spy'], ['p3', 'librarian'], ['p4', 'chef'],
+          ['p5', 'empath'], ['p6', 'monk'], ['p7', 'soldier'],
+        ],
+      }).state,
+    );
+    const classes = librarianAnswers(view, 'p3').map((a) => a.answerClass);
+    expect(classes[0]).toBe('canonical');
+    const firstRegistration = classes.indexOf('registration');
+    if (firstRegistration !== -1) {
+      expect(classes.slice(firstRegistration).every((c) => c === 'registration')).toBe(true);
     }
   });
 });
@@ -369,6 +471,28 @@ describe('fortuneTellerAnswers (§6.4)', () => {
     expect(answers[0]?.derivation[0]).toMatchObject({ label: 'off-constraint' });
     expect(answers[0]?.value).toBe(true);
     expect(fortuneTellerAnswers(view, 'p8', [])[0]?.value).toBe(false);
+  });
+
+  // §8.2 — derivations are user-facing; a zero-target call must not render a
+  // "true characters" line with an empty detail.
+  it('omits the "true characters" derivation line rather than rendering it empty when nobody is chosen', () => {
+    const view = toRulesView(nine().state);
+    const [first] = fortuneTellerAnswers(view, 'p8', []);
+    expect(first?.derivation.some((d) => d.label === 'true characters')).toBe(false);
+  });
+
+  // Cheap minor — pointing at the SAME player twice satisfies `chosen.length === 2`
+  // and would otherwise mint two answers sharing the key `ft:yes:<id>`, breaking
+  // §6.2's "stable key -> restorable selection" contract, and the deviation of a
+  // repeated target was silently invisible.
+  it('dedupes a target chosen twice, keeps answer keys unique, and flags the deviation (§4.8, §6.2)', () => {
+    const view = toRulesView(nine().state);
+    // p6 is the Recluse: chosen twice, not the Demon and not the herring, so it
+    // takes the registration branch that used to duplicate.
+    const answers = fortuneTellerAnswers(view, 'p8', ['p6', 'p6']);
+    const keys = answers.map((a) => a.key);
+    expect(new Set(keys).size).toBe(keys.length);
+    expect(answers[0]?.derivation[0]).toMatchObject({ label: 'off-constraint' });
   });
 });
 
@@ -421,5 +545,33 @@ describe('ravenkeeperAnswers (§6.4, guide §13)', () => {
     expect(answers[0]?.value).toBe('recluse');
     expect(answers.length).toBeGreaterThan(1);
     expect(answers.some((a) => a.answerClass === 'registration')).toBe(true);
+  });
+
+  // FIX 2 (Important) — a ruled Ravenkeeper answer must NOT carry the true
+  // character as its value (that would silently record "learned Recluse" when
+  // the display says "a minion of the Storyteller's choosing"). The shape must
+  // match the documented tuple contract so the downstream command-layer guard
+  // `Array.isArray(value) && value[0] === null` (which demands an `stChoice`)
+  // actually fires — that exact boolean is asserted directly below, since a
+  // bare `null` would type-check and read like a fix while leaving the guard
+  // permanently dead.
+  it('carries the true character as a bare value for the canonical answer, and a nulled tuple for each ruled answer', () => {
+    const view = toRulesView(nine().state);
+    const answers = ravenkeeperAnswers(view, 'p9', ['p6']);
+    const [canonical, ...ruled] = answers;
+
+    expect(canonical?.value).toBe('recluse');
+    expect(Array.isArray(canonical?.value) && (canonical!.value as readonly (string | null)[])[0] === null).toBe(
+      false,
+    );
+
+    expect(ruled.length).toBeGreaterThan(0);
+    for (const answer of ruled) {
+      expect(Array.isArray(answer.value)).toBe(true);
+      const [shown, targetId] = answer.value as readonly (string | null)[];
+      expect(shown).toBeNull();
+      expect(targetId).toBe('p6');
+      expect(Array.isArray(answer.value) && (answer.value as readonly (string | null)[])[0] === null).toBe(true);
+    }
   });
 });
