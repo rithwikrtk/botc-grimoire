@@ -4,6 +4,17 @@ import { toRulesView } from '../selectors/rulesView';
 import { checkVictory } from '../selectors/victory';
 import type { GameState, RuleFlagClass, RulesView, TxId, Victory } from '../types';
 
+/**
+ * Events that record an outcome §4.7 decides victory on. None of them may share
+ * a transaction with a PHASE_ADVANCED — see the check in `transaction`.
+ */
+const PHASE_INCOMPATIBLE_EVENT_TYPES: ReadonlySet<EventType> = new Set<EventType>([
+  'DEATH',
+  'EXECUTION',
+  'DEMON_DIED',
+  'ROLE_CHANGED',
+]);
+
 export interface Tx {
   emit<T extends EventType>(type: T, payload: GameEventPayloads[T]): void;
   /** The state including everything emitted so far in this transaction. */
@@ -16,8 +27,6 @@ export interface Tx {
 export interface TransactionOptions {
   /** §4.7 row 4 is only reachable in the transaction that closes the day. */
   dayClosed?: boolean;
-  /** Test seam: called once, when victory is checked at commit. */
-  onVictoryCheck?: (victory: Victory) => void;
 }
 
 export interface TransactionResult {
@@ -180,11 +189,41 @@ export function createStore(
       );
     }
 
+    // §4.7 — the invariant victory.ts's row 2 is scoped against, enforced here
+    // rather than promised in a comment.
+    //
+    // Row 2 (a Saint executed) only fires when the death's phase equals the
+    // view's phase, and that scoping is safe ONLY because no command advances
+    // the phase in the same transaction as an execution — the whole reason
+    // closeDay and beginNight are separate commands. Nothing checked it: the
+    // barrel exports `createStore` and `Store.transaction`, so Plan 2 could
+    // compose a transaction emitting both a DEATH { cause: 'execution' } and a
+    // PHASE_ADVANCED, row 2 would silently never fire, and no test in the tree
+    // would go red. `closeDay` proved the cost — moving its PHASE_ADVANCED
+    // inside its own transaction reddens 8 tests, but that is one command's
+    // coverage, not a guarantee over the command layer.
+    //
+    // Legitimate flows are unaffected: `beginNight` and `advanceToDay` advance
+    // the phase in their OWN transactions, which stage nothing else, and a
+    // DAY_CLOSED alongside a PHASE_ADVANCED is fine — DAY_CLOSED is not a
+    // victory-relevant outcome.
+    if (staged.some((e) => e.type === 'PHASE_ADVANCED')) {
+      const outcome = staged.find((e) => PHASE_INCOMPATIBLE_EVENT_TYPES.has(e.type));
+      if (outcome) {
+        txCounter -= 1;
+        throw new Error(
+          `transaction('${label}') staged both a PHASE_ADVANCED and a ${outcome.type}. ` +
+            'Victory is decided in the transaction that produces the outcome, while the phase ' +
+            'is still the one the outcome happened in (§4.7) — advance the phase in its own ' +
+            'transaction, as closeDay/beginNight do.',
+        );
+      }
+    }
+
     // §4.7 — EXACTLY ONCE, at commit, after every event of the action has landed.
     let victory = stagedState.victory;
     if (victory.status === 'ongoing') {
       victory = checkVictory(toRulesView(stagedState), { dayClosed: options.dayClosed ?? false });
-      options.onVictoryCheck?.(victory);
       if (victory.status !== 'ongoing') {
         // Every VICTORY_PREDICATE carries a non-null reason, so this can only
         // fire on a broken predicate — and it must be loud, not a quiet skip.
@@ -196,8 +235,6 @@ export function createStore(
         }
         append('GAME_ENDED', { winner: victory.status, reason: victory.reason });
       }
-    } else {
-      options.onVictoryCheck?.(victory);
     }
 
     // A transaction that stages nothing — an empty body, or a body whose only

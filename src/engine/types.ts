@@ -221,10 +221,18 @@ export interface LegalAnswer {
   /** Stable across recomputation at the same seq, so a selection can be restored. */
   key: string;
   /**
-   * The answer payload: a number, a boolean, a characterId, or a tuple. For the
-   * "1 of these 2 players is X" answers the tuple is `[characterId, a, b]`, and
-   * `characterId` is **null** when the Storyteller must pick which token to show
-   * because the named player was ruled into a team they are not (see `oneOfTwo`).
+   * The answer payload: a number, a boolean, a characterId, or a tuple.
+   *
+   * Two tuple shapes, both with the shown character FIRST:
+   *   - `[characterId, a, b]` — the "1 of these 2 players is X" answers
+   *     (`oneOfTwo`: Washerwoman, Librarian, Investigator).
+   *   - `[characterId, playerId]` — the single-player answers that can carry a
+   *     ruled registration (Ravenkeeper, Undertaker).
+   *
+   * In BOTH, the head is **null** when the Storyteller must pick which token to
+   * show, because the named player was ruled into a team they are not. That is
+   * what the command layer's guard reads: a null head demands an `stChoice`, so
+   * the token actually shown is recorded (§3.6, §4.3).
    */
   value: number | boolean | string | readonly (string | null)[] | null;
   /** What the Storyteller says or shows. */

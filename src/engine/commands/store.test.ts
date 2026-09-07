@@ -275,12 +275,16 @@ describe('commit-time victory (§4.7)', () => {
   });
 
   it('checks victory exactly once per transaction', () => {
-    // Spies on the real `checkVictory`, not the `onVictoryCheck` seam: that seam
-    // fires once per transaction by construction (it sits at the single commit
-    // call site), so it would count the same whether checkVictory itself ran
-    // once or moved into `append` and ran per event. Spying on the module
-    // itself is the only version of this test that actually counts invocations
-    // of the function §4.7 requires to run exactly once.
+    // Spies on the real `checkVictory` module function, which is the only way to
+    // count the invocations §4.7 requires to happen exactly once.
+    //
+    // `TransactionOptions` used to carry an `onVictoryCheck` observer described
+    // as this test's seam. It was not: this test never used it, and nothing
+    // else in the tree did either — a hook that fires once per transaction BY
+    // CONSTRUCTION (it sat at the single commit call site) would have counted
+    // the same whether checkVictory ran once or moved into `append` and ran per
+    // event, so it could not have witnessed this at all. Deleted as dead
+    // production surface rather than renamed.
     const store = seeded();
     const spy = vi.spyOn(victoryModule, 'checkVictory');
     try {
@@ -300,8 +304,13 @@ describe('commit-time victory (§4.7)', () => {
     // even if dayClosed were ignored entirely, which is how an earlier draft of it
     // asserted nothing at all.
     const store = seeded();
-    store.transaction('open day 2 and thin the herd', (tx) => {
+    // Two transactions, not one: staging a PHASE_ADVANCED alongside a DEATH is
+    // now refused, because that combination is what would silently disarm
+    // §4.7's row 2 (see the check in store.ts and its test below).
+    store.transaction('open day 2', (tx) => {
       tx.emit('PHASE_ADVANCED', { phase: 'day', number: 2 });
+    });
+    store.transaction('thin the herd', (tx) => {
       for (const id of ['p3', 'p4', 'p5', 'p6']) {
         const characterId = ROLES.find(([playerId]) => playerId === id)![1];
         tx.emit('DEATH', { playerId: id, characterIdAtDeath: characterId, cause: 'demon' });
@@ -314,6 +323,80 @@ describe('commit-time victory (§4.7)', () => {
     // The same state, with dayClosed, is the Mayor's win.
     const result = store.transaction('close the day', () => undefined, { dayClosed: true });
     expect(result.victory).toEqual({ status: 'good', reason: 'mayor_no_execution' });
+  });
+
+  /**
+   * FIX I5 — victory.ts's row 2 carries this in a comment:
+   *
+   *   "That scoping is safe ONLY because no command advances the phase in the
+   *    same transaction as an execution — see the closeDay/beginNight split."
+   *
+   * It was true, and nothing checked it. Row 2 (a Saint executed) only fires
+   * when the death's phase equals the view's phase, so a transaction that both
+   * executes someone and advances the phase silently disarms it: evil's Saint
+   * win becomes unreachable and no test anywhere goes red. The barrel exports
+   * `createStore` and `Store.transaction`, so Plan 2 can compose exactly that.
+   * Now it is a refusal in the store, where the invariant lives.
+   */
+  describe('the phase/outcome transaction invariant (§4.7)', () => {
+    it.each([
+      ['DEATH', (tx: Tx) => tx.emit('DEATH', { playerId: 'p4', characterIdAtDeath: 'chef', cause: 'execution', executionKind: 'vote' })],
+      ['EXECUTION', (tx: Tx) => tx.emit('EXECUTION', { playerId: 'p4', kind: 'vote' })],
+      ['ROLE_CHANGED', (tx: Tx) => tx.emit('ROLE_CHANGED', { playerId: 'p2', from: 'scarlet_woman', to: 'imp', reason: 'scarlet_woman' })],
+    ])('refuses a transaction staging a PHASE_ADVANCED and a %s', (_label, emitOutcome) => {
+      const store = seeded();
+      const before = store.getEvents().length;
+      expect(() =>
+        store.transaction('close and advance in one go', (tx) => {
+          tx.emit('PHASE_ADVANCED', { phase: 'day', number: 2 });
+          emitOutcome(tx);
+        }),
+      ).toThrow(/PHASE_ADVANCED/);
+      // Nothing committed, and the txId is handed back for reuse.
+      expect(store.getEvents()).toHaveLength(before);
+      expect(store.getState().phase).toEqual({ kind: 'night', number: 2 });
+    });
+
+    it('catches the order that actually causes the harm, outcome first', () => {
+      const store = seeded();
+      expect(() =>
+        store.transaction('execute then advance', (tx) => {
+          tx.emit('EXECUTION', { playerId: 'p4', kind: 'vote' });
+          tx.emit('DEATH', { playerId: 'p4', characterIdAtDeath: 'chef', cause: 'execution', executionKind: 'vote' });
+          tx.emit('PHASE_ADVANCED', { phase: 'day', number: 2 });
+        }),
+      ).toThrow(/PHASE_ADVANCED/);
+    });
+
+    // The legitimate flows this must NOT break: beginNight/advanceToDay advance
+    // the phase in transactions that stage nothing else, and a DAY_CLOSED
+    // alongside a PHASE_ADVANCED is fine — it records no outcome.
+    it('allows a phase advance on its own, and alongside DAY_CLOSED', () => {
+      const store = seeded();
+      expect(() =>
+        store.transaction('dawn', (tx) => {
+          tx.emit('PHASE_ADVANCED', { phase: 'day', number: 2 });
+        }),
+      ).not.toThrow();
+      expect(() =>
+        store.transaction('close and begin the night', (tx) => {
+          tx.emit('DAY_CLOSED', {});
+          tx.emit('PHASE_ADVANCED', { phase: 'night', number: 3 });
+        }),
+      ).not.toThrow();
+      expect(store.getState().phase).toEqual({ kind: 'night', number: 3 });
+    });
+
+    // ...and an outcome on its own, which is every command that kills anyone.
+    it('allows an execution with no phase advance', () => {
+      const store = seeded();
+      expect(() =>
+        store.transaction('an execution', (tx) => {
+          tx.emit('EXECUTION', { playerId: 'p4', kind: 'vote' });
+          tx.emit('DEATH', { playerId: 'p4', characterIdAtDeath: 'chef', cause: 'execution', executionKind: 'vote' });
+        }),
+      ).not.toThrow();
+    });
   });
 });
 

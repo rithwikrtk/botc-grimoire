@@ -93,6 +93,68 @@ function seededWithSpyNominator(): Store {
   return store;
 }
 
+/**
+ * FIX I7 — the cross-plan seam. The Virgin is the only ability in the edition
+ * triggered by a nomination rather than a night step, so it has no cursor and no
+ * step to sit on: it fires only if the app independently calls `evaluateVirgin`
+ * after EVERY nomination. Forgetting is silent — no error, no flag,
+ * `virginTriggered` never set, and the ability survives to fire on the next
+ * nomination against her, which looks like a correct game state. `nominate` now
+ * hands the evaluation back so the trigger cannot be missed at the call site.
+ *
+ * It is a SIGNAL only: `nominate` neither fires nor consumes the Virgin, which
+ * is why `virginTriggered` is still false after the nomination below.
+ */
+describe('nominate surfaces the Virgin trigger (§7, guide §11)', () => {
+  it('reports a fired Virgin nomination without resolving it', () => {
+    const store = seeded();
+    const result = nominate(store, 'p7', 'p4');
+    expect(result.virgin).toMatchObject({
+      isVirginNomination: true,
+      consumed: true,
+      fired: true,
+      needsRegistrationRuling: false,
+    });
+    // Signal only: nothing was resolved and nothing was consumed.
+    expect(result.events.map((e) => e.type)).toEqual(['NOMINATION_OPENED']);
+    expect(store.getState().players.find((p) => p.id === 'p4')?.virginTriggered).toBe(false);
+    expect(store.getState().players.find((p) => p.id === 'p7')?.alive).toBe(true);
+  });
+
+  it('reports a trigger that consumes the ability without an execution', () => {
+    const store = seeded();
+    // p2 is the Poisoner: the Virgin is consumed, but no Townsfolk nominated her.
+    const result = nominate(store, 'p2', 'p4');
+    expect(result.virgin).toMatchObject({ isVirginNomination: true, consumed: true, fired: false });
+  });
+
+  it('reports the ambiguous nominator the Storyteller must rule on (guide §11)', () => {
+    // The SPY roster, not the main one: only the Spy's registration list
+    // includes townsfolk (the Recluse's never does), so this is the sole
+    // fixture in the file that can reach needsRegistrationRuling at all.
+    const store = seededWithSpyNominator();
+    const result = nominate(store, 'p2', 'p3');
+    expect(result.virgin).toMatchObject({
+      isVirginNomination: true,
+      needsRegistrationRuling: true,
+    });
+  });
+
+  it('reports nothing for an ordinary nomination, and for a spent Virgin', () => {
+    const store = seeded();
+    expect(nominate(store, 'p7', 'p8').virgin.isVirginNomination).toBe(false);
+
+    nominate(store, 'p9', 'p4');
+    applyVirgin(store, 'p9', 'p4');
+    const afterwards = nominate(store, 'p10', 'p4');
+    expect(afterwards.virgin).toMatchObject({
+      isVirginNomination: true,
+      consumed: false,
+      fired: false,
+    });
+  });
+});
+
 describe('applyVirgin (§7, §16.5, §16.10)', () => {
   // A ruling flagged as inconsistent needs a PRIOR ruling about the same
   // player with a different team already in registrationHistory — a test that

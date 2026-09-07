@@ -1,7 +1,7 @@
 import { characterById } from '@/editions/troubleBrewing/characters';
 import { onDemonDeath } from '../rules/demonDeath';
 import { evaluateSlayer } from '../rules/slayer';
-import { evaluateVirgin } from '../rules/virgin';
+import { evaluateVirgin, type VirginEvaluation } from '../rules/virgin';
 import {
   butlerViolations,
   type FlagDraft,
@@ -36,14 +36,34 @@ function emitFlags(tx: Tx, issues: FlagDraft[]): void {
   for (const issue of issues) tx.flag(issue.rule, issue.class, issue.detail);
 }
 
+/**
+ * §7 — opens a nomination.
+ *
+ * `virgin` is a SIGNAL, not a resolution: nothing here fires the Virgin, and
+ * nothing here consumes her ability. It is returned because the Virgin is the
+ * one ability in the edition whose trigger is a nomination rather than a night
+ * step, so it has no cursor and no step to sit on — the app has to notice it. If
+ * the app forgets to call `evaluateVirgin` after a nomination, the failure is
+ * silent in the worst way: no error, no flag, `virginTriggered` never set, and
+ * the ability survives to fire on the NEXT nomination against her, which reads
+ * as a correct game state. Handing the evaluation back at the call site makes
+ * that impossible to miss.
+ *
+ * Evaluated against the state BEFORE the nomination, which is the same answer:
+ * `virginTriggered` is set by VIRGIN_TRIGGERED, not by NOMINATION_OPENED.
+ *
+ * `virgin.needsRegistrationRuling` means the nominator is ambiguous and the
+ * Storyteller must rule before `applyVirgin` can be called (guide §11).
+ */
 export function nominate(
   store: Store,
   nominatorId: PlayerId,
   nomineeId: PlayerId,
-): TransactionResult & { nominationId: string } {
+): TransactionResult & { nominationId: string; virgin: VirginEvaluation } {
   const id = nextNominationId(store.getState());
   const issues = nominationIssues(store.getState(), nominatorId, nomineeId);
   const view = toRulesView(store.getState());
+  const virgin = evaluateVirgin(view, nominatorId, nomineeId);
   const label = `${view.players.find((p) => p.id === nominatorId)?.name} nominates ${
     view.players.find((p) => p.id === nomineeId)?.name
   }`;
@@ -51,7 +71,7 @@ export function nominate(
     tx.emit('NOMINATION_OPENED', { id, nominatorId, nomineeId });
     emitFlags(tx, issues);
   });
-  return { ...result, nominationId: id };
+  return { ...result, nominationId: id, virgin };
 }
 
 export function castVote(store: Store, nominationId: string, voterId: PlayerId): TransactionResult {

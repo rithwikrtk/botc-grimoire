@@ -59,7 +59,11 @@ export const VICTORY_PREDICATES: readonly VictoryPredicate[] = Object.freeze([
     // Scoped to the current phase so a re-check on a later day cannot resurrect
     // it. That scoping is safe ONLY because no command advances the phase in the
     // same transaction as an execution — see the closeDay/beginNight split, which
-    // exists for exactly this reason.
+    // exists for exactly this reason. That is no longer a promise: `transaction`
+    // in commands/store.ts REFUSES a transaction that stages a PHASE_ADVANCED
+    // alongside a DEATH / EXECUTION / DEMON_DIED / ROLE_CHANGED, so composing
+    // one through the exported store is an error rather than a silently
+    // disarmed row 2.
     reason: 'saint_executed',
     winner: 'evil',
     test: (view) =>

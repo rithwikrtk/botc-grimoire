@@ -406,7 +406,8 @@ export const undertakerAnswers: Resolver = (view) =>
     // ability, so the ruled answers must be enumerated here rather than left to
     // `st_override`, which §4.3/§9 deliberately keep out of the registration
     // ledger and so out of §16.6's contradiction check. Shaped exactly like
-    // `ravenkeeperAnswers` below, including the null-headed 2-tuple value.
+    // `ravenkeeperAnswers` below and `oneOfTwo` above, including the
+    // null-headed 2-tuple value the command layer's `stChoice` guard reads.
     for (const option of registrationOptionsForCharacterId(execution.characterIdAtDeath)) {
       if (option.team === trueCharacter.team) continue;
       answers.push(
@@ -456,11 +457,19 @@ export const ravenkeeperAnswers: Resolver = (view, _actorId, targets = []) => {
         `ravenkeeper:${target.id}:${option.team}`,
         // A ruled answer never carries the TRUE character as its value — the
         // display says "a minion of the Storyteller's choosing", so the value
-        // must show that no token is named yet. `[null, target.id]` matches the
-        // documented tuple contract (types.ts) so the downstream command-layer
-        // guard `Array.isArray(value) && value[0] === null` (which demands an
-        // `stChoice`) actually fires; a bare `null` would type-check but leave
-        // that guard permanently dead, since `Array.isArray(null)` is false.
+        // must show that no token is named yet. `[null, target.id]` is the
+        // documented tuple contract (types.ts) and the shape `oneOfTwo` already
+        // uses for the Washerwoman / Librarian / Investigator, so every ruled
+        // answer in the edition reads the same way and the command layer needs
+        // one rule, not two.
+        //
+        // A correction to what this comment used to say: it claimed a bare
+        // `null` would leave the downstream guard
+        // `Array.isArray(value) && value[0] === null` permanently dead. That is
+        // false — `oneOfTwo` reaches the same guard, and answerClass.test.ts'
+        // stChoice test fires it through the Investigator, not through here.
+        // The shape is still right; the reason is consistency, not sole
+        // witness.
         [null, target.id],
         `a ${option.team} of the Storyteller's choosing`,
         [

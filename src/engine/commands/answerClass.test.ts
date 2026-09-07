@@ -253,6 +253,8 @@ describe('answer classes (§4.3)', () => {
       if (++guard > 80) throw new Error('night 1 did not terminate');
     }
     advanceToDay(store);
+    // Two transactions: an execution and a PHASE_ADVANCED may not share one
+    // (store.ts's §4.7 check), which is exactly the closeDay/beginNight split.
     store.transaction('execute the Recluse on day 1', (tx) => {
       tx.emit('DEATH', {
         playerId: 'p10',
@@ -261,6 +263,8 @@ describe('answer classes (§4.3)', () => {
         executionKind: 'vote',
       });
       tx.emit('DAY_CLOSED', {});
+    });
+    store.transaction('begin night 2', (tx) => {
       tx.emit('PHASE_ADVANCED', { phase: 'night', number: 2 });
     });
 
