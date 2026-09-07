@@ -2,11 +2,10 @@
 ## Design Document
 
 Date: 2026-09-07
-Status: draft v2 — revised after three-lens adversarial review
+Status: draft v3 — revised after a second, five-lens adversarial review
 Edition scope: **Trouble Brewing only**
 
-> v1 of this document is kept at `2026-09-07-botc-storyteller-app-design.v1.md.bak`.
-> A change log is at §16.
+> v1 and v2 are kept as `.v1.md.bak` / `.v2.md.bak`. Change log: §17.
 
 ---
 
@@ -15,789 +14,890 @@ Edition scope: **Trouble Brewing only**
 Running Trouble Brewing as Storyteller means holding a large amount of hidden,
 mutable state in your head while performing for a table: who is which character,
 who is poisoned or protected *right now*, what you told whom and whether it was
-true, who has nominated, who has voted, who has spent a dead vote, and which lies
-you are currently maintaining. A physical Grimoire and a printed night sheet cover
-part of this and leave the Storyteller doing arithmetic live, under social
-pressure, with no record of what was said.
+true, who nominated, who voted, who spent a dead vote, and which lies you are
+maintaining. A physical Grimoire and a printed night sheet cover part of this and
+leave you doing arithmetic live, under social pressure, with no record of what was
+said.
 
 This app is a **single-user private tool for the Storyteller**, used on a phone or
 laptop during an in-person game. It is not a game client for players. The one
 exception is Spy Mode (§10).
 
+**It assists; it is not an oracle.** Every computed number shows its derivation
+(§8.2) and every answer can be overridden without the log calling you a liar
+(§4.3). A printed night-order sheet on the table remains recommended — the guide
+says so twice, and it is the one fallback that survives a dead battery.
+
 ## 2. Confirmed requirements
 
 | Decision | Choice |
 |---|---|
-| Spy grimoire delivery | Same device. Hand it over, take it back. |
-| Information | App enumerates *legal* answers; Storyteller chooses; fabrications are a separate labelled category (§4.3). |
-| Platform | Static client-side app (React + Vite), `localStorage`. No backend, no accounts. |
+| Spy grimoire delivery | Same device. Hand it over, take it back (§10.3). |
+| Information | App enumerates *legal* answers and shows its working; you choose; fabrication and override are separate labelled classes (§4.3). |
+| Platform | Static client-side app (React + Vite), `localStorage`, **installable and offline-capable** (§12). No backend, no accounts. |
 | Role assignment | Randomize a legal set, then edit before locking in. |
-| Day phase | Full nomination and vote tracking, including threshold math. |
-| Event log | Automatic, timestamped, interleaved with typed notes. Never visible in Spy Mode. |
-| Responsive | Phone-first; desktop is the same layout with more room (§13). |
-| Rule enforcement | **Advisory.** The app warns and records; it never blocks a rule break (§7). |
-| Editions | Trouble Brewing is built. The engine is edition-agnostic so others can be added (§3.8). |
+| Day phase | Full nomination and vote tracking, including threshold math. In Slice 1. |
+| Rule enforcement | **Advisory.** The app warns and records; it never blocks and never silently alters a tally (§4.8). |
+| Event log | Automatic, timestamped, interleaved with typed notes. |
+| Editions | Trouble Brewing is built. Edition *data* is isolated; the engine is not claimed to be edition-agnostic (§3.8). |
+| Responsive | Phone-first, one column. Desktop is the same layout with a max-width. |
 
 ---
 
-## 3. Architecture: event-sourced core
+## 3. Architecture
 
 `state = events.reduce(applyEvent, initialState)`
 
-### 3.1 Why (corrected rationale)
+### 3.1 Why
 
-v1 justified this primarily on "undo is `events.slice(0, -1)`". That justification
-was **wrong** — see §3.4. The real ranking is:
+1. **The log is a hard product requirement** and must never drift from state. The
+   guarantee actually comes from having exactly *one write path*; event sourcing is
+   the cheapest way to make that structural.
+2. Transactional undo (§3.4).
 
-1. **The log is a hard product requirement** and must never drift from state. Any
-   mutable-state design needs a parallel log that *can* drift.
-2. **Edit-and-replay.** Because all randomness is pre-resolved into event data
-   (§3.3), editing an event and re-reducing is deterministic and free. This is the
-   correction operation a Storyteller actually needs.
-3. Undo — a distant third, and only when transactional.
+v2 also claimed edit-and-replay as a justification. **That was wrong and it has been
+deleted** — see §3.4.
 
 ### 3.2 Event envelope
 
-Every event is `{ id, seq, txId, ts, night?, day?, type, payload }`.
+`{ seq, txId, ts, type, payload }`
 
 - `txId` — **one Storyteller action = one transaction**, however many events it
-  emits. Non-negotiable: resolving the Monk step emits `NIGHT_STEP_RESOLVED` +
-  `STATUS_APPLIED`; an Imp kill on the Mayor can emit `NIGHT_KILL_RESOLVED` +
-  `DEATH` + `ROLE_CHANGED` + `GAME_ENDED`.
-- `ts` — stamped by the **command layer**, never inside `applyEvent`. All events
-  are timestamped, not just notes.
-- `schemaVersion` is stored once on the persisted envelope (§12).
+  emits. Resolving the Monk step emits `NIGHT_STEP_RESOLVED` + `STATUS_APPLIED`; an
+  execution emits four or more. Undo drops every event sharing the last `txId`.
+- `ts` — stamped by the command layer, never inside `applyEvent`. Every event.
+- `seq` is the array index. There is no separate `id`, and no `night`/`day` on the
+  envelope — both are derivable from the last `PHASE_ADVANCED`.
+- `schemaVersion` **and `appVersion`/`buildHash`** are stored once on the persisted
+  blob (§12.4).
 
-### 3.3 Purity rule, and how it is enforced
+### 3.3 Purity rule
 
-**The reducer is pure.** No `Math.random()`, no `Date.now()` inside `applyEvent`.
-All randomness *and every Storyteller choice* is resolved before the event is
-created and stored as literal data on it — otherwise replay produces a different
-game than the one that was played.
+**The reducer is pure.** No `Math.random()`, no `Date.now()`, no `new Date()`, no
+`performance.now()`, no `crypto.*` inside `applyEvent`. All randomness and every
+Storyteller choice is resolved before the event is created and stored as literal
+data on it.
 
-Choices that must be event data (v1 missed most of these): role deal, demon
-bluffs, Drunk's believed character, Fortune Teller red herring, information
-candidate-pair selection, **Mayor bounce target**, **Imp starpass successor**,
-**Recluse/Spy registration rulings**, **Undertaker's pick when two players were
-executed**, **Librarian's "zero Outsiders" signal**.
+Choices that must be event data: role deal, demon bluffs, Drunk's believed
+character, red herring, information candidate selection, Mayor bounce target,
+starpass successor, registration rulings, the Undertaker's pick when two players
+were executed.
 
-Prose is not enforcement. Four mechanisms:
+Two enforcement mechanisms, both cheap:
 
-1. **Seeded PRNG.** `GAME_CREATED` carries a seed; all randomness routes through
-   it. Even if purity is accidentally broken, replay stays deterministic.
-2. **Layer split.** `commands/` (impure: reads state, uses the RNG, returns a
-   transaction of events) vs `reducer/` (pure, may import only `rules/`). A step's
-   `apply()` is a *command handler*, not a reducer, and is **never called during
-   replay**.
-3. **Test setup file** for reducer tests stubs `Math.random`, `Date.now` and
-   `crypto.getRandomValues` to throw.
-4. **Property test:** `reduce(events)` twice, and after a JSON round-trip, deep-equal.
+1. **A Vitest project scoped to `src/reducer/**`** whose setup file stubs
+   `Math.random`, `Date`, `performance` and `crypto` to throw. Scoped, not global —
+   a global stub breaks fake timers, `waitFor`, and any library that formats a date.
+2. **Property test:** `reduce(events)` twice, and after a JSON round-trip,
+   deep-equal (not byte-equal — `undefined` fields and `Set`s do not survive JSON).
+
+v2 also specified a seeded PRNG "so that replay stays deterministic even if purity
+breaks". **Deleted.** Under this design the reducer never draws, so the seed is
+never consumed during replay and defends against nothing.
 
 ### 3.4 Correction model
-
-Three distinct operations. v1 had only the first, and had it wrong.
 
 | Situation | Mechanic | Log shows |
 |---|---|---|
 | Mistap, never happened at the table | **Undo** — drop every event sharing the last `txId` | nothing |
-| Wrong value several steps back, info not yet spoken | **Edit-and-replay** — tap the log entry, change the payload, re-reduce | the corrected value |
-| Wrong, but already announced to a player | **Correction event** — `EVENT_CORRECTED { targetEventId, patch, reason }` | both the original and the correction |
+| Wrong, and it already happened | **Compensating event** — `ROLE_CHANGED { reason:'st_correction' }`, `STATUS_CLEARED`, a corrective `DEATH`, or a `NOTE_ADDED` | both the original and the correction |
 
-`SPY_VIEWED` / `SPY_VIEW_ENDED` are a non-undoable event class — they are an audit
-trail and must not be popped by the undo stack.
+**Edit-and-replay and `EVENT_CORRECTED` are deleted.** They were unsound: §3.3
+freezes derived outcomes onto events, so re-reducing after an edit leaves a stale
+`chosenAnswer` labelled `canonical`, and a `NIGHT_KILL_RESOLVED { outcome:
+'monk_protected' }` that the new state contradicts. Making it sound requires a
+downstream revalidation pass costing more than the whole rest of the model. The
+narrow case it served — "wrong value several steps back, nothing said aloud yet" —
+is covered by undo plus a note.
 
-### 3.5 Performance — an explicit non-decision
+`SPY_VIEWED` / `SPY_VIEW_ENDED` are non-undoable: they are an audit trail.
 
-A 10-player, 5-day game is roughly 400 events; a pathological 15-player game is
-under 1,500. Reducing 1,500 small objects is well under a millisecond against a
-16ms frame. **No snapshotting.** The two things that would actually bite:
+### 3.5 Performance
 
-- calling `reduce` inside a per-player component (15× per render) → one
-  `useMemo` at the provider, with structural sharing so unchanged players keep identity;
-- `JSON.stringify(events)` synchronously on every tap → fine at this size, but this
-  is the O(n)-per-tap to watch, not the reduce.
+Corrected from v2, which under-counted by ignoring votes. A 10-player 5-day game is
+**700–1,000 events** (voting dominates: one `VOTE_CAST` per voter per nomination);
+a pathological 15-player game approaches **3,000**. Still trivial — but the reduce
+runs once per tap, not per frame, and on a mid-range Android 3,000 events through
+status-expiry and victory checks is single-digit milliseconds, not "well under a
+millisecond".
+
+- **Fold incrementally.** Cache `(lastState, lastSeq)` and apply only newly-appended
+  events. Full replay only on undo and on boot.
+- **`applyEvent` must return referentially-identical sub-objects when unchanged** —
+  this is a stated requirement with a test, not something `useMemo` provides.
+- Debounce persistence to `requestIdleCallback`, force-flush on `pagehide` and
+  `visibilitychange` (not `beforeunload` — unreliable on mobile Safari).
 
 ### 3.6 Event catalogue
 
 ```
-GAME_CREATED        { players: [{id, name, seat}], seed }
-PLAYER_ADDED        { id, name, seat }
-PLAYER_REMOVED      { playerId, reason }
-PLAYER_RENAMED      { playerId, name }
-SEAT_CHANGED        { playerId, seat }
+GAME_CREATED        { players: [{id, name, seat}], edition: {id, version} }
+PLAYER_CHANGED      { playerId, op: 'add'|'remove'|'rename'|'reseat', ...fields }
 
 ROLES_ASSIGNED      { assignments: {playerId: characterId},
                       distribution: {townsfolk, outsiders, minions, demons},
-                      baronApplied: boolean,
-                      demonBluffs: [charId × 3] | null,
+                      setupModifiers: [{characterId, teamDeltas}],
+                      demonBluffs: [charId × 3] | null,      // 7+ players only
                       drunkBelief: {playerId, believesCharacterId} | null,
                       redHerring: playerId | null }
 ROLE_CHANGED        { playerId, from, to,
                       reason: 'starpass'|'scarlet_woman'|'st_correction'|'st_balance' }
 
 PHASE_ADVANCED      { phase: 'night'|'day', number }
-DAY_CLOSED          { executedId: playerId | null }
+DAY_CLOSED          { }                       // executions derived, never stored
 
-NIGHT_STEP_RESOLVED { stepId, actorId, perceivedCharacterId, targets: [playerId],
-                      legalAnswers: Answer[], chosenAnswer: Answer,
-                      answerClass: 'canonical'|'registration'|'fabricated',
-                      registrationRulings: [{playerId, registeredAs}],
-                      abilityFunctional: boolean, effectSuppressed: boolean,
-                      stChoice?: any }
-NIGHT_STEP_SKIPPED  { stepId, actorId, reason }
-NIGHT_KILL_RESOLVED { attackerId, chosenTargetId,
-                      outcome: 'died'|'monk_protected'|'soldier'|'mayor_bounced'
-                              |'starpass'|'no_effect',
-                      actualVictimId: playerId | null,
+NIGHT_STEP_RESOLVED { stepId, actorIds: [playerId], perceivedCharacterId,
+                      targets: [playerId], chosenAnswer, answerClass,
+                      answerReason?, registrationRulings: [{playerId, registersAs}],
+                      abilityFunctional, effectSuppressed, stChoice? }
+NIGHT_STEP_SKIPPED  { stepId, actorIds, reason: 'condition_unmet'|'st_skip' }
+NIGHT_KILL_RESOLVED { stepId, actorIds, attackerId, chosenTargetId,
+                      resolutionChain: [{targetId, result}],
+                      finalVictimId: playerId | null,
                       successorId: playerId | null }
 
-STATUS_APPLIED      { playerId, status, sourcePlayerId,
+STATUS_APPLIED      { playerId, status, sourcePlayerId, effective: boolean,
                       expiresAt: {kind:'night'|'day', number} }
 STATUS_CLEARED      { playerId, status, sourcePlayerId }   // manual override only
 
 DEATH               { playerId, characterIdAtDeath,
                       cause: 'demon'|'execution'|'slayer'|'other',
-                      executionKind?: 'vote'|'virgin',
-                      phase: {kind, number} }
+                      executionKind?: 'vote'|'virgin' }
 DEMON_DIED          { deadDemonId, aliveCountAtDeath,
-                      successorId: playerId | null,
-                      successorReason: 'scarlet_woman'|'starpass'|null }
+                      successorId, successorReason: 'scarlet_woman'|'starpass'|null }
 
 NOMINATION_OPENED   { id, nominatorId, nomineeId }
 VOTE_CAST           { nominationId, voterId }
-NOMINATION_CLOSED   { id, tallySnapshot, thresholdSnapshot,
-                      butlerVotesDisregarded: [voterId] }
+NOMINATION_CLOSED   { id, auditTally, auditThreshold, butlerVotesFlagged }
 EXECUTION           { playerId | null, kind: 'vote'|'virgin' }
-VIRGIN_TRIGGERED    { nominatorId, fired: boolean,
-                      reason?: 'poisoned'|'not_townsfolk'|'already_used' }
-SLAYER_CLAIMED      { claimantId, targetId, claimantIsRealSlayer: boolean,
-                      abilityFunctional: boolean, targetRegisteredAsDemon: boolean,
-                      outcome: 'died'|'nothing' }
+VIRGIN_TRIGGERED    { nominatorId, fired, reason? }
+SLAYER_CLAIMED      { claimantId, targetId, claimantIsRealSlayer,
+                      targetIsTrueDemon, targetRegisteredAsDemon,
+                      abilityFunctional, outcome: 'died'|'nothing' }
 
-CLAIM_RECORDED      { playerId, claimedCharacterId, day,
-                      confidence: 'hard'|'soft', note? }
+RULE_FLAGGED        { rule, relatedTxId, class: 'social'|'integrity', detail }
+CLAIM_RECORDED      { playerId, claimedCharacterId, day, confidence, note? }
 CLAIM_RETRACTED     { claimId }
-RULE_FLAGGED        { rule, relatedEventId, detail }
 NOTE_ADDED          { scope: 'player'|'game', playerId?, text }
-EVENT_CORRECTED     { targetEventId, patch, reason }
 SPY_VIEWED          { }
 SPY_VIEW_ENDED      { }
-GAME_ENDED          { winner: 'good'|'evil',
-                      reason: 'demon_dead'|'two_alive'|'saint_executed'
-                             |'mayor_no_execution' }
+GAME_ENDED          { winner, reason: 'demon_dead'|'two_alive'|'saint_executed'
+                                     |'mayor_no_execution'|'abandoned' }
 ```
 
-Note `characterIdAtDeath` on `DEATH`: without it the Undertaker cannot correctly
-report a Minion who was executed *after* being promoted to Imp, because
-`ROLE_CHANGED` has already overwritten `characterId`.
+Notes on shapes that were wrong in v2:
 
-Note `VOTE_CAST` has no `usedDeadVote` field — whether a vote consumes the dead vote
-is a function of state, not a caller assertion, and must be derived.
+- **Every step event carries `stepId`.** v2's `NIGHT_KILL_RESOLVED` did not, so the
+  night cursor could never mark the Imp step settled and looped forever.
+- **`actorIds` is always an array.** v2 mixed singular `actorId` with group steps
+  declared as `actorIds: []`, which the cursor could never select.
+- `NOMINATION_CLOSED`'s tally fields are **write-only forensic record**, never read
+  by a selector. v2 named one `butlerVotesDisregarded`, which encoded the opposite
+  of the ruling in §16.3.
+- `DAY_CLOSED` carries no `executedId`. A Virgin trigger plus a vote execution means
+  two executions in one day; a singular field made the Mayor's win condition fire on
+  a day where someone *was* executed.
+- `legalAnswers` is **not** stored — it is a pure function of state at that `seq` and
+  is recomputed when a log entry is expanded. Storing the cross-product could be
+  kilobytes per event.
+- `STATUS_APPLIED.effective` freezes whether the source's ability worked *at
+  application time*, so a Grimoire token is placed even when suppressed (the
+  physical Storyteller does place it) without lying about its effect.
 
 ### 3.7 Derived state
 
 ```
 players[]  { id, name, seat, characterId, perceivedCharacterId, alignment, alive,
-             statusLedger: [{status, sourcePlayerId, appliedAt, expiresAt}],
-             claims: [{characterId, day, confidence, retracted}],
-             infoHistory: [{night, stepId, chosenAnswer, answerClass}],
-             deadVoteSpent, virginTriggered, slayerUsed }
-phase        { kind: 'setup'|'night'|'day'|'ended', number }
-resolvedStepIds  Set<(stepId, actorId)>   // per night — replaces v1's nightQueue
+             statusLedger[], claims[], infoHistory[], deadVoteSpent,
+             virginTriggered, slayerUsed, demonSince, demonNotified }
+phase          { kind, number }
+settledStepIds Set<string>          // `${stepId}:${actorKey}` — resolved ∪ skipped
 todaysExecutions [{playerId, characterIdAtDeath, kind}]
-nominations[]    // today
-victory      { status: 'ongoing'|'good'|'evil', reason }
-distribution { townsfolk, outsiders, minions, demons }   // public, §8 of the guide
+nominations[]  ruleFlags[]  notes[]  distribution  edition
+victory        { status: 'ongoing'|'good'|'evil', reason }
 ```
 
-Booleans like `poisoned` are **selectors over `statusLedger`**, not stored flags —
-that is what makes §4.4 expressible.
+`poisoned` and friends are **selectors over `statusLedger`** comparing `expiresAt`
+to the current phase — not stored flags, and not a per-phase filtering pass.
+`settledStepIds` is a `Set<string>`: v2 typed it `Set<(stepId, actorId)>`, and a JS
+`Set` compares tuples by reference, so every lookup would have missed.
 
-### 3.8 Edition boundary
+### 3.8 Edition boundary — honest version
 
-Trouble Brewing is the only edition built. It must not be the only edition
-*possible*. Everything edition-specific lives in one module, and engine code never
-names a character:
+Edition **data** lives in one folder, because Trouble Brewing needs it anyway:
 
 ```
 src/editions/troubleBrewing/
-  characters.ts    // id, team, ability text, setup modifiers (Baron ±2), capability flags
-  nightOrder.ts    // ordered step definitions, first night and other nights
-  distribution.ts  // the player-count chart
-  registration.ts  // who may register as what (Recluse, Spy)
-  victory.ts       // win conditions and their precedence
-  resolvers.ts     // the handful of bespoke handlers (Mayor bounce, starpass…)
+  characters.ts     // id, team, ability text, capability flags, setup modifiers
+  nightOrder.ts     // ordered step definitions, first night and other nights
+  distribution.ts   // the player-count chart
+  registration.ts   // who may register as what
+  victory.ts        // win predicates in precedence order
+  resolvers.ts      // bespoke handlers
+  stepIds.ts        // frozen id list — part of the replay contract
 ```
 
-The engine (reducer, night cursor, status ledger, vote math, persistence, Spy Mode)
-imports the active edition through one interface and branches on **capabilities**,
-never on `characterId === 'monk'`. The check is mechanical and belongs in CI:
+`GAME_CREATED` records `edition: {id, version}`, so an archived game knows which
+module to replay against.
 
-```
-grep -rE "'(imp|monk|poisoner|butler|recluse|spy|mayor|soldier)'" src/engine/   # must be empty
-```
+**v2 claimed "engine code never names a character", enforced by a CI grep. Both are
+deleted.** The claim was false on day one — §4.1's own definition tests
+`characterId === 'drunk'` — and the grep was broken three ways: `grep` exits 1 on no
+match, so under `set -e` it failed the build when it passed; it false-positived on
+`'spy'` because Spy Mode lives in the engine; and it covered 8 of 22 characters.
 
-**What this deliberately is not: a general rules DSL.** Trying to express every
-character declaratively is how side projects like this die. Bespoke logic is fine —
-it lives in the edition module, keyed by character id, behind a stable interface.
-The goal is that adding Bad Moon Rising means writing a new folder, not editing the
-engine.
+**Known edition debt.** Adding a second edition will require engine edits, not just
+a folder. Recorded now so it is a decision rather than a surprise:
 
-| Edition-agnostic by construction | Edition-specific |
+| Debt | Why |
 |---|---|
-| Event envelope, reducer, corrections (§3) | Character list and ability text |
-| Perceived-character indirection (§4.1) | Night orders, first and other |
-| Ability gating (§4.2) | Distribution chart and setup modifiers |
-| Status ledger and expiry (§4.4) | Registration rules |
-| Night cursor (§6.1) | Win conditions and precedence |
-| Nominations, vote math, thresholds (§7) | Bespoke resolvers |
-| Persistence, Spy Mode, Grimoire | |
+| `NIGHT_KILL_RESOLVED` is single-target | Po kills 3, Shabaloth eats 2 |
+| `alive` is monotonic, derived from `DEATH` | Zombuul appears alive; Shabaloth resurrects |
+| No delayed/conditional death | Pukka poisons night N, kills night N+1 |
+| `alignment` derived from character | The Goon changes alignment |
+| `drunkBelief` is a singleton | The Lunatic is a second false-belief layer |
+| Engine enums name TB concepts | `'starpass'`, `'saint_executed'`, `VIRGIN_TRIGGERED` |
+| `fabricated` requires a droisoned actor | Vortox inverts this |
 
-Note that §4.4's status lifetimes and §4.7's win conditions are written as Trouble
-Brewing *instances* of an edition-agnostic mechanism — a lifetime is data on
-`STATUS_APPLIED`, and victory is an ordered list of predicates supplied by the
-edition. Neither is hardcoded in the engine.
+What genuinely transfers: the status ledger with declarative lifetimes, the lazy
+night cursor, nominations and vote math, persistence, Spy Mode, the event envelope.
 
 ---
 
 ## 4. Rules engine — the core predicates
 
-Everything in §§6–7 is built from these five. v1 had none of them, which is the root
-cause of most review findings.
-
 ### 4.1 Perceived character (the Drunk)
 
 ```
 perceivedCharacterId(state, playerId) =
-  characterId === 'drunk' && drunkBelief.playerId === playerId
+  character.falseSelfBelief && drunkBelief.playerId === playerId
     ? drunkBelief.believesCharacterId
-    : characterId          // post-ROLE_CHANGED value
+    : characterId
 ```
 
-**v1 bug:** the night queue filtered steps by "character in play". The Drunk's
-believed Townsfolk is *by construction not in play*, so the Drunk would never have
-been woken for any ability — instantly outing them at the table on night 1, and
-directly contradicting guide §13 ("wake the Drunk too and go through the same
-motions").
+Steps resolve **actors**, not a character:
+`wakes: (s) => playersWithPerceivedCharacter(s, 'monk')` — always an array, so a
+real Empath and a Drunk-believing-Empath both wake, separately, at the same step.
 
-Steps therefore resolve **actors**, not a character:
-`wakes: (s) => playersWithPerceivedCharacter(s, 'monk')` — always an array; a real
-Empath and a Drunk-believing-Empath both wake, separately, at the same step.
+**The invariant, which v2 left unstated and which is load-bearing:**
 
-All "learn a character" computations (Undertaker, Ravenkeeper, Investigator,
-Librarian) read the **true** `characterId`, never the perceived one — guide §13.
+> `perceivedCharacterId` may be consulted **only** by `wakes()` and by step/UI
+> rendering. Every rules predicate — kill resolution, victory, Virgin, Slayer,
+> registration, alignment, distribution, and every "learn a character" answer —
+> reads the **true** `characterId`.
+
+Without it, an implementer writes `perceivedCharacterId(x) === 'soldier'` in the
+kill resolver and a Drunk-believing-Soldier survives the Demon. Enforced by an
+eslint rule restricting where the function may be imported.
 
 ### 4.2 Ability functionality
 
 ```
-abilityFunctional(state, playerId) = alive && !poisoned(playerId) && !isDrunk(playerId)
+abilityFunctional(state, p) =
+  (character.requiresAlive ?? true ? alive(p) : true) && !poisoned(p) && !isDrunk(p)
 ```
 
-**v1 bug:** drunk/poison was handled only on the *information* side. Effects were
-never gated, so a poisoned Monk really protected, a poisoned Poisoner really
-poisoned, and — flatly contrary to guide §11 — a **poisoned Virgin still executed
-the nominator**.
+**v2 bug:** the predicate hardcoded `alive &&`, which disabled the **Ravenkeeper**
+permanently — their ability fires *because* they died — and made §4.7 read as *evil
+never wins on a Saint execution*, one of only two evil win conditions. Both now
+carry `requiresAlive: false`.
 
-Gated: Monk, Poisoner, Soldier, Mayor (both the bounce and the 3-alive win),
-Virgin, Slayer, Scarlet Woman, Butler, and every information ability.
+v2 also asserted that a dead Butler's dead vote still requires their Master to vote.
+**That was wrong** (guide §12: abilities are lost on death except the Ravenkeeper's)
+and contradicted its own predicate. A dead Butler's ghost vote is unrestricted.
 
 **Not gated: registration.** A poisoned Recluse still registers ambiguously —
-registration is a passive property, not an ability. This is a classic bug; it gets
-its own test.
+registration is a passive property, not an ability. Its own test.
 
-When an effect is suppressed the step still runs and still emits
-`NIGHT_STEP_RESOLVED { effectSuppressed: true }` — the Storyteller must go through
-the identical motions at the table.
+A suppressed effect still runs the step and still places the reminder token
+(`STATUS_APPLIED { effective: false }`) — the physical Storyteller does.
 
-### 4.3 Registration (Recluse and Spy)
+### 4.3 Registration and answer classes
 
-**v1 bug:** the spec promised "the app computes the true answer". With a Recluse or
-Spy alive *or dead* there is often no single true answer — it is a Storyteller
-ruling, and guide §6 says that ambiguity is load-bearing.
+`legalAnswers` is the cross-product over each ambiguous player's registration
+options; `canonicalAnswer` is the answer with no shenanigans.
 
-```
-legalAnswers  = cross-product over each ambiguous player's registration options
-canonicalAnswer = the answer with no registration shenanigans
-answerClass   = 'canonical' | 'registration' | 'fabricated'
-```
+| `answerClass` | Meaning | Constraint |
+|---|---|---|
+| `canonical` | The plain true answer | — |
+| `registration` | A Recluse/Spy ruled to register differently | requires `registrationRulings` |
+| `fabricated` | A lie | **only** when the actor is drunk or poisoned |
+| `st_override` | You disagreed with the app | requires `answerReason`; never warned |
 
-`fabricated` is **only valid when the actor is drunk or poisoned** — the app warns
-otherwise. `registration` requires a non-empty `registrationRulings` naming only
-Recluses and Spies. This matters because v1's `wasTruthful: false` would have
-labelled legal, truthful play as a lie and corrupted the whole log.
-
-Affected: Chef, Empath, Fortune Teller, Washerwoman, Librarian, Investigator,
-Undertaker, Ravenkeeper, Virgin (guide §11 — a Spy nominator may register as
-Townsfolk), Slayer (a Recluse may register as the Demon and *die*).
-
-A **registration ledger** view shows every ruling made, so the Storyteller can stay
-consistent — or knowingly not be.
+`st_override` is new in v3 and exists because of a trust trap: without it, a
+Storyteller who believes a computed number is wrong must either say a number they
+think is wrong, or record their own correct answer as `fabricated` against a sober
+player — poisoning the lies ledger and libelling themselves in the permanent log.
+Overrides are excluded from the lies ledger, listed separately, and are a useful
+defect signal: three overrides on the Empath step is a bug report from the field.
 
 ### 4.4 Status lifetimes
 
-**v1 bug:** clearing was embedded in the actor's own step ("Monk: remove previous
-protection…"), and dead actors' steps were filtered out. So a Poisoner executed on
-Day 3 left their victim **poisoned for the rest of the game**.
-
-Expiry is declarative and time-driven, never actor-driven:
-
 | Status | Applied | Expires | Source |
 |---|---|---|---|
-| `poisoned` | night N | end of day N (guide §1: "tonight and tomorrow day") | Poisoner |
-| `protected` | night N | dawn of night N | Monk |
+| `poisoned` | night N | end of day N | Poisoner |
+| `protected` | night N | end of night N | Monk |
 | `master` | night N | end of day N | Butler |
 | `redHerring` | setup | never | setup |
 
-`STATUS_APPLIED` carries `expiresAt`; the derived selector filters expired statuses
-on every `PHASE_ADVANCED`. Independent of whether the source still lives.
-`STATUS_CLEARED` survives only as a manual Storyteller override.
+Declarative and time-driven, never actor-driven — a Poisoner executed on Day 3 must
+not leave their victim poisoned for the rest of the game. §6.3's "remove previous
+mark" entries are **physical table instructions**, not the mechanism.
 
 ### 4.5 Demon kill resolution
 
-v1 specified nothing between "Imp points" and a death. **The Soldier and the Mayor
-did not appear anywhere in v1 at all.**
+Order is the rule. v2 stated it twice — pseudocode and prose — and the two
+disagreed, with the pseudocode starpassing before checking Monk protection.
 
 ```
 resolveDemonKill(state, targetId):
-  target is the attacker themself  -> starpass (§4.6)
-  protected by a functional Monk   -> outcome 'monk_protected', no death
-  target is a functional Soldier   -> outcome 'soldier', no death
-  target is a functional Mayor     -> ST prompt: bounce? to whom?
-                                      -> 'mayor_bounced', actualVictimId
-  otherwise                        -> 'died'
+  !abilityFunctional(attacker)      -> 'no_effect'          // poisoned Imp
+  target is already dead            -> 'no_effect'
+  protected by a functional Monk    -> 'monk_protected'
+  target is a functional Soldier    -> 'soldier'
+  target is the attacker themself   -> starpass (§4.6)
+  target is a functional Mayor      -> ST picks a bounce target (alive, not the
+                                       Mayor, not the attacker); re-run the three
+                                       guards above on the bounce target
+  otherwise                         -> 'died'
 ```
 
-Emitted as one `NIGHT_KILL_RESOLVED` transaction. The step UI shows the outcome
-("Protected — no death tonight") before advancing, because it determines the dawn
-announcement. A Monk-protected Imp that targets itself does **not** starpass.
+Recorded as a `resolutionChain` with a `finalVictimId`, so "bounced, then blocked"
+is representable and the dawn announcement can render it.
 
 ### 4.6 Demon death — one shared, phase-agnostic handler
 
-**v1 bug:** Scarlet Woman promotion was handled only as a night *notification*.
-Its most common trigger is a **daytime execution**, and v1's day phase had no path
-that could emit `ROLE_CHANGED` at all. Combined with the missing win check, good
-would have been declared the winner the instant the Imp was executed at 5 alive.
-
-Invoked identically from night kill, execution, and Slayer:
+Invoked from night kill, execution, and Slayer — but **only when the dead player's
+true character is the Demon**. v2 routed any successful Slayer shot here, so a
+Recluse ruled to register as the Demon would have promoted the Scarlet Woman while
+the real Imp was alive: two living Imps.
 
 ```
 onDemonDeath(deadDemonId):
   if starpass and a living Minion exists -> ST picks successor
   else if Scarlet Woman alive && abilityFunctional && aliveCountAtDeath >= 5
                                          -> Scarlet Woman becomes Imp
-  else                                    -> no successor
-  emit DEMON_DIED, then ROLE_CHANGED, then checkVictory()
+  else                                   -> no successor
+  emit DEMON_DIED, ROLE_CHANGED; set demonSince; checkVictory at commit
 ```
 
-`aliveCountAtDeath` **counts the dying Demon** — confirmed ruling, following TPI:
-5 alive including the executed Imp → the Scarlet Woman takes over, leaving 4. Named
-test: `scarlet_woman_promotes_at_exactly_five_including_dying_demon`.
+`aliveCountAtDeath` counts the dying Demon (§16.1).
 
 ### 4.7 Win conditions
 
-**v1 bug:** `GAME_ENDED` existed in the catalogue and *nothing produced it*. Guide
-§7: check immediately after every death.
+`checkVictory(state)` is pure and runs **exactly once per transaction, at commit** —
+never per event, never inside `applyEvent`. v2 specified both, and the per-event
+reading declares good the winner the instant the Imp dies, before the Scarlet
+Woman's `ROLE_CHANGED` lands, undoing §4.6 entirely.
 
-`checkVictory(state)` is pure, invoked after every death-producing transaction, every
-`ROLE_CHANGED`, and at day close. **Ordered precedence:**
-
-| # | Winner | Condition | Checked at |
+| # | Winner | Condition | Transaction |
 |---|---|---|---|
-| 1 | Good | No living player holds the Demon character, *after* successor resolution | every DEATH / ROLE_CHANGED |
-| 2 | Evil | Saint died by execution (vote or Virgin) and the Saint's ability was functional | EXECUTION |
-| 3 | Evil | `aliveCount === 2` | every DEATH |
-| 4 | Good | `aliveCount === 3`, Mayor alive and functional, day closed with no execution | DAY_CLOSED |
+| 1 | Good | No living player holds the Demon, after successor resolution | any death / role-change tx |
+| 2 | Evil | Saint died by execution (vote or Virgin), ability functional | execution tx |
+| 3 | Evil | `aliveCount <= 2` | any tx changing the living set |
+| 4 | Good | `aliveCount === 3`, Mayor alive and functional, and `todaysExecutions.length === 0` | day-close tx |
 
-Precedence matters: if the Demon's death brings the count to 2, **good wins** (1
-before 3). Surfaced as a **blocking modal**, not a toast — the Storyteller must be
-told mid-tally, at the table.
+Row 1 precedes row 3: a Demon death that brings the count to 2 is a **good** win.
+Row 3 uses `<=`, not `==`, because `PLAYER_CHANGED { op:'remove' }` can step over 2.
+Any transaction changing the living set triggers the check, including player removal.
+
+Surfaced as a blocking modal. `nextStep()` returns null once `victory.status !==
+'ongoing'`, so the night cannot continue past the end of the game.
+
+### 4.8 Advisory enforcement (global)
+
+**The app never blocks a rule break, and never silently alters what happened.** A
+broken rule everyone already acted on *has happened*; an app that refuses the input
+doesn't undo it, it just loses the game state and leaves you fighting the tool.
+
+This applies at night as well as by day — v2 scoped it to the day phase while §6
+still used hard `excludeSelf` / `excludeDead` target filters, so a Monk who pointed
+at himself at the table could not be recorded. Target constraints are **soft**:
+off-constraint picks are selectable, styled as warnings, and emit `RULE_FLAGGED` in
+the same transaction.
+
+Two classes, because they deserve different handling:
+
+- **`social`** — extra vote, double nomination, spent dead vote, invalid Butler
+  vote, Monk self-protect, Butler self-master. Recorded, flagged, and **honoured
+  arithmetically**. The tally counts what was raised.
+- **`integrity`** — targeting a dead player, self-nomination, executing someone
+  already dead. Recorded and flagged, but produce **no derived state change**; the
+  banner says so. Engine invariant, with a test: no sequence of flagged events can
+  make `aliveCount` negative, produce two living Demons, or emit a `DEATH` for a
+  player already dead.
 
 ---
 
 ## 5. Setup
 
-1. **Players.** Names and seating order (load-bearing for Chef and Empath).
-   5–15 players. Warn below 7 that Minion/Demon info and bluffs do not apply
-   (guide §2).
-2. **Deal.** Explicit order, since the Baron is drawn *during* the deal:
-   draw Demon → draw Minions → **if Baron drawn, apply +2 Outsiders / −2 Townsfolk**
-   → draw Outsiders → draw Townsfolk. Then resolve the 3 demon bluffs (good
-   characters not in play), the Drunk's believed Townsfolk (a Townsfolk **not
-   otherwise in play**), and the Fortune Teller's red herring (any good player,
-   which may legally be the Fortune Teller themselves).
-3. **Edit.** Swap any assignment, reroll all, or reroll one slot. Legality
-   re-validated on every edit.
-4. **Lock in.** Emits `ROLES_ASSIGNED`, including the post-Baron `distribution` —
-   which is **public information** (guide §8) and is displayed persistently
-   thereafter, because the Storyteller has to read it out to the table.
+1. **Players.** Names and seating order. 5–15. Warn below 7 that Minion/Demon info
+   and bluffs do not apply.
+2. **Deal.** Demon → Minions → **apply setup modifiers (Baron ±2)** → Outsiders →
+   Townsfolk. Then: 3 demon bluffs (good characters not in play — **7+ players
+   only**; v2 dropped this qualifier that v1 had right), the Drunk's believed
+   Townsfolk (not otherwise in play, and excluded from the in-play set used by
+   Washerwoman/Investigator), the red herring (any good player, possibly the Fortune
+   Teller themselves).
+3. **Edit.** Swap, reroll all, reroll one. Legality re-validated.
+4. **Lock in.** Records the post-modifier `distribution`, which is **public** and
+   displayed persistently thereafter.
+5. **Confirm seating.** A seat-ring view and an explicit confirmation. Seating is
+   load-bearing for Chef and Empath, and a circle entered backwards or off by one
+   makes every positional answer wrong for the whole game — a failure no unit test
+   can reach. Re-confirmed at each dusk with one tap: *Seating unchanged? [Yes] /
+   [Someone moved]*.
 
 ---
 
 ## 6. Night engine
 
-### 6.1 A lazy cursor, not a queue
-
-**v1 bug:** the queue was "rebuilt at the start of each night". Three things make
-that impossible: the Ravenkeeper's condition ("died *tonight*") is decided by the
-Imp step *later the same night*, so the Ravenkeeper would never have woken; a player
-killed at the Imp step would still have been woken for Empath, Fortune Teller and
-Butler afterwards; and starpass/Scarlet Woman change `characterId` mid-night.
+### 6.1 Lazy cursor
 
 ```
-nextStep(state) = first step in NIGHT_ORDER[first|other] where
-    step.wakes(state) is non-empty
-    && (stepId, actorId) not in resolvedStepIds
+nextStep(state) =
+  victory.status !== 'ongoing' ? null
+  : first step in NIGHT_ORDER[first|other] where
+      step.wakes(state) is non-empty
+      && stepKey(step, actors) not in settledStepIds
 ```
 
-Re-evaluated after **every** `NIGHT_STEP_RESOLVED`. There is no materialised queue.
+Re-evaluated after **every** step event. No materialised queue.
+
+- `settledStepIds` = resolved ∪ **skipped**. v2 counted only resolved, so tapping
+  "skip" returned the same step forever — a hard stall, at night, live.
+- `stepKey` is a string: `` `${stepId}:${grouping === 'group' ? 'GROUP' : actorId}` ``.
+- Passing over a step whose condition is unmet emits `NIGHT_STEP_SKIPPED { reason:
+  'condition_unmet' }`, so the log can answer "why didn't the Undertaker wake?"
+- **The cursor is deliberately non-monotonic.** A mid-night Scarlet Woman promotion
+  re-opens a step that sits earlier in the night order. This is intended, not a bug.
+- The night ends when `nextStep()` returns null → `PHASE_ADVANCED { day }`.
 
 ### 6.2 Step shape
-
-Declarative wherever possible, so §14 can test conditions independently of UI:
 
 ```js
 { id: 'monk',
   wakes: (s) => playersWithPerceivedCharacter(s, 'monk').filter(alive),
+  grouping: 'per-actor' | 'group',
   firstNight: false,
-  script: { instruction, showCard?: 'this_is_the_demon'|'not_in_play'|'you_are',
-            showToken?: 'computed'|characterId,
-            output: 'point'|'fingers'|'nod'|'token'|'none' },
-  reminderTokens: { add: ['protected'], remove: [] },
-  targets: { min:1, max:1, excludeSelf:true, excludeDead:true },
-  computeCandidates: (s, targets) => LegalAnswer[],   // pure, render-safe
+  script: { instruction, wakeConfirm, sleepConfirm,
+            showCard?: 'this_is_the_demon'|'these_are_your_minions'
+                      |'not_in_play'|'you_are',
+            showToken?, output: 'point'|'fingers'|'nod'|'token'|'handover'|'none' },
+  reminderTokens: { add: ['protected'], remove: [] },   // table instructions
+  targets: { min, max, distinct?, warnSelf?, warnDead?, warnRepeat? },  // soft
+  computeCandidates: (s, targets) => LegalAnswer[],     // pure, render-safe
   effect: { status:'protected', lifetime:'until_dawn' },
-  gatedByAbility: true }
+  requiresAlive?: boolean }
 ```
 
-`stepId` values are **part of the replay contract** — frozen in a versioned constant
-list. Rename one and every archived game breaks. `computeCandidates` is pure and
-memoisable; default selection among candidates happens **once on step entry**, not
-during render (otherwise the Washerwoman decoy reshuffles every frame).
+`computeCandidates` receives a narrowed `RulesView` (players, characters, statuses,
+phase, deaths) — **not** the full `GameState`, so the edition layer structurally
+cannot see notes or the lies ledger. Default selection among candidates happens
+**once on step entry**, never during render, or the Washerwoman decoy reshuffles
+every frame.
 
-Pseudo-steps in both orders: `dusk_confirm_eyes_closed` (with a skippable ~10s
-countdown), `dawn_wait`, `dawn_announce_deaths` (renders the resolved outcome, or
-"no one died tonight" — the app is what knows whether the Monk blocked the kill).
+Pseudo-steps in both orders: `dusk_confirm_eyes_closed` (skippable countdown, plus
+the §5.5 seating check), `dawn_wait`, `dawn_announce_deaths` (renders the resolved
+outcome, including "no one died tonight" when the Monk blocked it).
 
-### 6.3 First night vs other nights — the explicit diff
+Group steps: Minion info (eye contact, conditional on ≥2 Minions) and Demon info
+resolve once for the whole set.
+
+### 6.3 First night vs other nights
 
 | | First night | Other nights |
 |---|---|---|
 | Minion info / Demon info + 3 bluffs | yes, **7+ players only** | no |
-| Washerwoman, Librarian, Investigator, Chef | yes | no (guide §9: one-time) |
-| Poisoner | yes, no "remove previous" | yes, remove previous first |
+| Washerwoman, Librarian, Investigator, Chef | yes | no |
+| Poisoner | yes | yes |
 | Monk, Undertaker, Imp, Ravenkeeper, Scarlet Woman | no | conditionally |
 | Deaths | none | possible |
 | Spy, Empath, Fortune Teller, Butler | yes | yes |
 
+The **Scarlet Woman notification** condition is `isDemon && demonSince != null &&
+!demonNotified` — a persistent flag, not "promoted this night". A promotion by
+daytime execution on Day 3 must notify on Night 4, and `settledStepIds` is per-night
+so a per-night predicate would silently never fire.
+
 ### 6.4 Information
 
-Per §4.3 each info step shows: the canonical answer, the full legal answer set when
-a Recluse or Spy is involved, a loud banner if the actor is drunk or poisoned, and
-what this player has been told before. Librarian has an explicit **"zero Outsiders
-in play"** branch (guide §3 step 7), which is also a legal choice when a Recluse is
-in play.
+Every info step shows the canonical answer, **its derivation** (§8.2), the legal
+answer set when a Recluse or Spy is involved, a loud banner when the actor is drunk
+or poisoned, what this player has been told before, and an always-available override.
 
-Chef: adjacency is **circular**, and a run of *k* adjacent evil players contributes
-*k−1* pairs, not 1. Empath: **alive** neighbours, skipping the dead around the circle.
-
-Minion-info and Demon-info are **group steps** — `actorIds: []`, not a single actor.
+Chef: circular adjacency; a run of *k* adjacent evils contributes *k−1* pairs.
+Empath: **alive** neighbours, skipping the dead around the circle. Librarian has an
+explicit zero-Outsiders branch. The Librarian may be shown the Drunk (a real
+Outsider); the Washerwoman may **not** be shown the Drunk under their believed
+Townsfolk.
 
 ---
 
 ## 7. Day phase
 
-**Advisory enforcement — the app never blocks a rule break.** Every validation below
-warns, records, and lets play continue. At a real table a broken rule that everyone
-already acted on *has happened*; an app that refuses the input doesn't undo it, it
-just loses the game state and leaves the Storyteller fighting the tool. So an invalid
-Butler vote **counts**, a second nomination by the same player **goes through**, a
-dead player voting twice **goes through** — each flagged. Every such case emits
-`RULE_FLAGGED` alongside the normal event, raises a dismissible banner, and appears
-in the log and the post-game summary.
-
-- **Dawn** happens in the night engine (§6.2), not here.
-- **Nominations.** Checked: nominator alive, nominee alive, nominator ≠ nominee
-  (guide §10: "one *other* living player"), neither has already nominated / been
-  nominated today. Derived from today's events — not stored flags. (v1 had two
-  fields, `nominatedToday` and `hasNominatedToday`, which is a bug factory.) A failed
-  check flags, it does not block.
-- **Voting.** Voters presented in **clockwise order from the nominee's left** (the
-  app knows the seating). Threshold `ceil(alive / 2)` — verified against guide §10's
-  worked examples (8→4, 7→4, 5→3, 4→2).
-- **Butler.** Tally is *derived*, not stored, so it survives corrections and
-  retroactive validation in either order (guide §10). A drunk or poisoned Butler's
-  vote always counts. A dead Butler's dead vote still requires the Master to vote.
-  **An invalid Butler vote still counts toward the tally** — the app tells you a rule
-  was broken and logs it, and you decide what to do about it at the table. Guide §10
-  puts enforcement on the Butler, not the Storyteller, so the app must never silently
-  strike a hand that was raised.
-- **Dead votes.** Derived from `VOTE_CAST` where the voter was dead at that `seq`.
-  A dead player voting with their dead vote already spent is **flagged and allowed**,
-  per the advisory rule above — the vote counts and you are told.
-- **Execution.** Highest tally that also meets threshold; tie at the top → no
-  execution. Once a nomination is the unique highest and meets threshold, that
-  player **is** executed — there is no legal "skip" at that point.
-- **Virgin.** Fires on the first nomination *ever* against the Virgin, if the
-  nominator is a true Townsfolk (a Spy may be ruled Townsfolk — guide §11) and the
-  Virgin is functional. The **nominator** dies; the Virgin survives and loses the
-  ability either way. Poisoned Virgin: silently nothing. Emits an `EXECUTION` with
-  `kind:'virgin'` that bypasses voting, and the day **continues**.
-- **Two executions in one day** (Virgin + vote) is therefore possible;
-  `todaysExecutions` is a list, and the Undertaker step becomes a Storyteller choice
-  when it has more than one entry.
-- **Slayer.** *Anyone* may publicly claim Slayer and shoot. `SLAYER_CLAIMED` records
-  the claimant, whether they are the real Slayer, whether their ability is
-  functional, and whether a Recluse target was ruled to register as the Demon. A
-  successful shot routes through §4.6.
+- **Nominations.** Checked: nominator alive, nominee alive, nominator ≠ nominee,
+  neither has already nominated / been nominated today. Derived from today's events.
+  Failures flag per §4.8; they do not block.
+- **Voting.** Voters presented clockwise from the nominee's left. Threshold
+  `ceil(alive / 2)` — verified against guide §10 (8→4, 7→4, 5→3, 4→2).
+- **Butler.** An invalid Butler vote **counts toward the tally**. The app tells you a
+  rule was broken and logs it; you decide. See §16.3 — the reason is an information
+  leak, not just ergonomics. A drunk or poisoned Butler's vote always counts. A dead
+  Butler's ghost vote is unrestricted.
+- **Dead votes.** Derived from `VOTE_CAST` where the voter was dead at that `seq`. A
+  second dead vote is flagged and counted.
+- **Execution.** Highest tally meeting threshold at day close; a tie at the top means
+  no execution. Once a nomination is the unique highest and meets threshold, that
+  player is executed — there is no legal skip at that point (§16.8).
+- **Virgin.** Fires on the first nomination ever against the Virgin, if the nominator
+  is a true Townsfolk (a Spy may be ruled Townsfolk) and the Virgin is functional.
+  The **nominator** dies. The Virgin survives and **loses the ability either way,
+  including when poisoned**. The nomination then proceeds to a normal vote.
+- **Two executions in one day** is therefore possible; `todaysExecutions` is a list,
+  and the Undertaker step becomes a Storyteller choice when it has more than one.
+- **Slayer.** Anyone may claim it. `SLAYER_CLAIMED` records whether the claimant is
+  the real Slayer, whether their ability is functional, whether a Recluse target was
+  ruled to register as the Demon, and — separately — whether the target **is** the
+  true Demon. Only the last routes into §4.6.
 
 ---
 
-## 8. Grimoire screen
+## 8. Screens
 
-The screen that is open 80% of the game, and which v1 never specified.
+### 8.1 Inventory and navigation
 
-Per player: seat, name, true character, alignment glyph, alive/dead, dead-vote
-spent, active status chips (poisoned / protected / Master / red herring /
-`Drunk — believes Empath`), latest claim, note count.
+One-column, phone-first. Bottom tab bar: **Grimoire · Night/Day · Log · Reference**.
 
-Persistent header: night or day number, alive count, current execution threshold,
-and the **public T/O/M/D counts** (guide §8).
+| Screen | Notes |
+|---|---|
+| Setup → Deal → Seating confirm | Linear, once |
+| **Grimoire** | Default screen. Seat ring or list, toggleable |
+| Night step | Modal over the Grimoire — dismissible to consult the Grimoire without losing an in-progress target selection, which is held in a scratch object persisted on every tap |
+| Night overview | Tonight's full ordered step list, settled/current/upcoming, tap to jump. Replaces the printed sheet rather than walking it one step at a time |
+| Day: nominations & votes | |
+| Log / timeline | Events and notes interleaved |
+| Player sheet | Notes, claim history, `infoHistory` |
+| Reference | Character abilities, voting rules, dead-player rules — readable aloud when someone asks |
+| Spy Mode | Above the router (§10) |
+| Post-game summary | Final roles, deaths, lies, claims vs truth |
 
-Tap a player → sheet with notes, claim history, and their full `infoHistory`.
+Grimoire rows: seat, name, true character, alignment **glyph** (never colour alone),
+alive/dead, dead-vote spent, status chips (`poisoned`, `protected`, `Master`,
+`red herring`, `Drunk — believes Empath`), latest claim, note count. Persistent
+header: phase and number, alive count, current threshold, and the public T/O/M/D
+counts. At 15 players the list scrolls; the header does not.
+
+### 8.2 Show your working
+
+Every computed number renders its derivation beneath it:
+
+```
+Empath — Bea:  1
+   Ali (dead, skipped) → Bea ← Cy
+   Ali GOOD · Cy EVIL
+
+Chef:  2
+   ring: Dan* Eve* Fin* Gus Hal      (* = evil)
+   pairs: (Dan,Eve) (Eve,Fin)
+
+Threshold:  4        ceil(7 alive / 2)
+```
+
+This is the only defence against the app being *silently* wrong. A wrong integer is
+unfalsifiable at the table — you are using the app precisely because you did not
+want to do the arithmetic. A wrong derivation is obvious at a glance, and it catches
+the likeliest cause of all: a seating order entered wrong on night zero, which no
+unit test can ever reach.
 
 ---
 
-## 9. Notes, claims, and the lies ledger
+## 9. Notes, claims, ledgers
 
-- **Notes.** Per-player and general, free text — where you lied, what a player
-  misunderstood, overall read. Never rendered in Spy Mode.
-- **Claims.** Structured, not free text, because guide §5 makes claim-tracking an
-  explicit Storyteller duty and free text cannot answer *who else claimed Empath?*
-  or *is anyone claiming a character that isn't in play?* The Grimoire flags: two
-  hard claims on one character, a claim on a character not in play (a bluff — or the
-  Drunk), and a claim matching a demon bluff.
-- **Info history.** Per player: what you told them, on which night, and its
-  `answerClass`. Answers "what did I tell the Empath on night 2?" in two taps.
-- **Lies ledger.** Every `answerClass: 'fabricated'` across the game on one screen —
-  the Storyteller's most fragile mental state, currently only recoverable by reading
-  the raw log.
-- **Registration ledger** (§4.3).
+Free-text notes (per-player and general); structured **claims** with conflict
+flagging (two hard claims on one character, a claim on a character not in play, a
+claim matching a demon bluff); per-player **info history**; a **lies ledger** of
+every `fabricated` answer; an **overrides** list; a **registration ledger** so you
+can stay consistent about the Recluse — or knowingly not be.
 
 ---
 
 ## 10. Spy Mode
 
-Shows only objective game facts (guide §14), at the fidelity of a **physical
-Grimoire**: seating, true characters, current status markers, and the reminder
-tokens that physically sit in a Grimoire — the Fortune Teller's **red herring**, the
-three **demon bluffs**, and the **Drunk's believed-character** marker. Showing less
-than this would be a nerf to the Spy relative to an in-person game.
+### 10.1 What it shows
 
-What Spy Mode never contains: notes, claims, the info history, the lies ledger, the
-registration ledger, `answerClass` on any answer, and the event log. That boundary is
-the point of the four mechanisms below.
+Seating, true characters, status markers, plus the red herring, the demon bluffs and
+the Drunk's believed-character marker (§16.2). Never: notes, claims, info history,
+lies, overrides, registration rulings, or the event log.
 
-**Structural separation — four mechanisms, because a projection function alone is a
-convention, not a structure:**
+### 10.2 Structural separation
 
-1. `SpyView` is a **hand-written interface**, not `Omit<GameState, ...>` — `Omit`
-   silently admits every field added later; a hand-written type fails to compile
-   until you consciously map it.
-2. **Canary test:** every note and flag in the fixture contains `"CANARY"`; assert
-   `JSON.stringify(toSpyView(state))` does not contain it. Catches transitive leaks
-   that a top-level key check would pass.
-3. **Module boundary:** `src/spy/**` may not import `src/game/state`, enforced by an
-   eslint `no-restricted-imports` rule — a convention becomes a build error.
-4. Spy Mode renders in its own route and component tree; no shared player-token
-   component with the Grimoire.
+1. **Hand-written `SpyView`**, not `Omit<GameState, …>` — `Omit` silently admits
+   every field added later. Paired with an exhaustive key partition so that adding
+   *any* field to `GameState` is a compile error until it is classified as allowed
+   or denied. (v2 claimed a hand-written interface alone would fail to compile. It
+   would not — nothing references it in a way that notices.)
+2. **`toSpyView` builds its result field by field. No spreads.** TypeScript is
+   erased; excess-property checking does not fire through a variable, so a spread
+   ships every secret field to `JSON.stringify` while type-checking clean.
+3. **Canary test:** a generated fixture seeds `"CANARY"` into every string leaf;
+   assert `JSON.stringify(toSpyView(state))` does not contain it.
+4. **Spy components import nothing from game state** — they receive `SpyView` as
+   props. Enforced by eslint, with the caveat recorded that `no-restricted-imports`
+   does not catch transitive imports.
 
-**Physical hardening.** v1 offered "a deliberate confirm", which addresses a stray
-tap and nothing else — while an adversarial player holds an unlocked browser:
+### 10.3 Physical hardening
 
-- `mode: 'spy'` is **persisted**. A reload, an iOS tab discard, or a low-memory
-  reload must land back *in* Spy Mode, not in the Grimoire. Without this the feature
-  is unsound.
-- `history.pushState` trap so Back re-pushes the Spy route.
-- Return to Spy Mode on `visibilitychange` / `blur`, so an app switch or a
-  notification tap doesn't expose the Grimoire.
-- **Hold-to-exit:** press and hold for 2 seconds to leave Spy Mode. Chosen over a
-  PIN deliberately — a PIN would be typed every night, in the dark, while people
-  watch, and the friction would cost more than it buys.
-- `SPY_VIEWED` / `SPY_VIEW_ENDED` bracket the session so the log shows duration.
-- A web app cannot fully close this — a determined player holding an unlocked
-  browser has options no page can revoke. The four mechanisms above cover the
-  realistic cases (stray tap, reload, Back, app switch); OS-level screen pinning
-  remains available to the Storyteller if a given table warrants it.
+- **Fail closed at first paint.** An inline script in `index.html`, before the
+  bundle, reads the persisted mode and marks the document; the shell renders neutral
+  until the mode resolves. An unknown or unparseable mode renders **blank, not the
+  Grimoire**. v2 would have painted the Grimoire for at least a frame on every cold
+  load, and defaulted to it on every failure.
+- **The spy gate sits above the router:** `if (mode === 'spy') return <SpyRoot/>`
+  before any route matching. Back then navigates harmlessly; the gate still renders
+  Spy Mode. v2's `pushState` trap is unreliable — Chrome skips history entries
+  created without user activation, and iOS's interactive back-swipe renders a live
+  snapshot of the previous entry *before* `popstate` fires, handing the Spy a
+  scrubbable screenshot of the Grimoire.
+- On entering: `replaceState` the current entry to a neutral card **first**, then
+  push the spy entry, so the back-swipe snapshot is not the Grimoire.
+- Re-render Spy Mode on `visibilitychange` / `blur` when mode is already spy.
+- Hold-to-exit for 2 seconds, on a **small corner-anchored control** — never a
+  full-screen gesture, so it cannot collide with the panic-blank restore.
+- Hold the wake lock during Spy Mode: a phone that auto-locks in the Spy's hands
+  forces you to unlock it in front of them, past a lock screen with notification
+  previews.
+- **The handover is one guarded transition.** The Spy's night step has a single
+  primary action, *Enter Spy Mode*, and the instruction "hand the phone over" is
+  rendered **only inside** Spy Mode. There is no screen that says hand it over which
+  is not already Spy Mode. This is a structural fix for the worst outcome in the
+  document — forgetting to enter Spy Mode first exposes the Grimoire, the notes and
+  the lies ledger, and the game is socially over.
+- On exit, land on a neutral "take the phone back" card, not a live action.
 
----
-
-## 11. Live-conditions safety (outside Spy Mode)
-
-Three hours at a table where everyone wants to see the screen, and a phone is
-readable at two metres in a way a face-down Grimoire is not.
-
-- **Panic blank:** two-finger tap, or a volume-key `keydown`, instantly renders a
-  neutral "Night 3 — in progress" card. Tap-and-hold 300ms to restore.
-- **Auto-blank** after 45s of inactivity in any private view.
-- **Optional redacted Grimoire:** characters as first-letter chips, expanded on hold.
-- Alignment is **never** colour-only — a red-tinted row reads across a table. Use a
-  glyph.
-- Role text at a deliberately small size; one row expanded at a time.
+A web app cannot fully close this. OS-level screen pinning (iOS Guided Access,
+Android app pinning) is the only real control for a device physically handed to an
+adversary, and belongs in the pre-game checklist.
 
 ---
 
-## 12. Persistence
+## 11. Live-conditions safety
 
-`localStorage`, single active game. Every event appends and autosaves.
-~400 events × ~200 bytes ≈ 80KB per game, so capacity is not the risk — **failure
-handling is**, and v1 had none.
+- **Panic blank:** a persistent full-width bar in the thumb zone (one tap, no gesture
+  recognition), plus two-finger tap implemented on `pointerdown` with
+  `isPrimary === false`. Hold 300ms to restore.
+- **Blank on `visibilitychange` / `pagehide`,** synchronously, for all private views
+  — the iOS app switcher screenshots whatever was last on screen.
+- Alignment by glyph, never colour alone. Role text deliberately small; one row
+  expanded at a time.
 
-1. `try/catch` every write, with a persistent red **"NOT SAVING"** banner on
-   failure. Without this, quota-exceeded or private-browsing failure is silent, and
-   the Storyteller finds out 90 minutes later.
-2. **Ring buffer of 3 saves** under rotating keys; on boot, if the primary won't
-   parse, offer recovery from the previous.
-3. **Second-tab guard** via `BroadcastChannel`; a stale tab goes read-only with a
-   banner rather than clobbering.
-4. **`schemaVersion`** on the stored blob and every export, with a load-time
-   migration-or-refuse path.
-5. **Mid-night resume:** the cursor is derived from events (§6.1), so a reload lands
-   on the exact unresolved step. In-progress target selection is held in a small
-   scratch object persisted on every tap. On boot: *"Game in progress — Night 3, step
-   4/9 (Imp). Resume / Export / Discard."*
-6. **Auto-export prompt at each dawn** — a dead battery is the realistic total-loss
-   scenario, and manual export is never remembered mid-game.
-7. Post-game summary screen (final roles, deaths, every lie, claims vs truth) —
-   generated from the event log. **No multi-game archive**: it drives the quota risk
-   and a Storyteller does not reread old games. Export covers it.
+Cut from v2: the **volume-key** trigger (a web page cannot observe hardware volume
+keys on either target platform — the claim was simply false), the **45-second
+auto-blank** (a night step routinely goes >45s without a tap while you gesture at
+the table; it would blank mid-performance and fight the wake lock), and the
+**redacted first-letter Grimoire** (Monk/Mayor, and five characters starting with S).
+
+---
+
+## 12. Persistence and offline
+
+1. **Installable and offline-first.** `vite-plugin-pwa` precaching the whole bundle,
+   a manifest, and "Add to Home Screen" in the pre-game checklist. Without this, a
+   reload with patchy signal is a white page while the game sits unreachable in
+   `localStorage` — and the mid-night resume story depends on reload. Installation
+   also exempts the origin from Safari's 7-day storage eviction and removes browser
+   chrome, shrinking the Spy Mode back-button surface.
+   `registerType: 'prompt'`, `skipWaiting: false`, and **never activate a waiting
+   worker while a game is in progress**.
+2. **Self-hosted fonts and a `connect-src 'none'` CSP**, so "no backend, no network"
+   is machine-checked rather than promised. One stray Google Fonts link would defeat
+   offline loading silently.
+3. **Write-verify, not try/catch.** Modern Safari private browsing returns a working
+   `localStorage` that does *not* throw — it discards at session end. So v2's
+   try/catch caught nothing and the "NOT SAVING" banner had no trigger. Instead:
+   write, read back, compare a checksum; and detect private mode with a
+   cross-session sentinel. Failure shows a persistent banner *with an action*:
+   "NOT SAVING — export now and keep this tab open."
+4. **Version skew.** Store `schemaVersion` + `appVersion`/`buildHash`; show the build
+   id in the UI. On load, if the build changed and `phase !== 'setup'`, warn plainly.
+   **A refused load must never overwrite or delete the blob, and must always offer a
+   raw export.** Policy: no deploys on game day.
+5. **Two rotating saves**, each self-identifying by a counter *inside* the blob, so
+   boot picks the max with no separate pointer key to tear. (v2's three-slot buffer
+   defended the least likely failure — `setItem` is atomic — while all three slots
+   die together in every failure that actually matters.)
+6. **Export and import, both in Slice 1.** v2 had export only, which makes it a
+   souvenir: no way to reproduce a weird game, build a test from it, or move it to a
+   laptop after the phone dies. Export via `navigator.share` with `<a download>`
+   fallback; filenames non-descriptive, since notes name real people.
+7. **Second-tab guard** with a `localStorage` heartbeat and a lease, plus a prominent
+   **"Take control on this tab"** button on the read-only banner — otherwise a tab
+   discard plus a fresh open locks you out of your own game mid-night.
+8. Mid-night resume derives from events; in-progress target selection is a scratch
+   object persisted on every tap. On boot: *"Night 3, Imp step. Resume / Export /
+   Discard."*
 
 ---
 
 ## 13. Responsive & accessibility
 
-Dark theme only (a white screen in a dim room lights up the Storyteller's face and
-is readable across the table). Touch targets ≥44×44px with ≥8px separation.
-Destructive or irreversible actions (lock in roles, execute, end game, exit Spy
-Mode) never adjacent to frequent ones (next step, select target). Primary night
-controls in the bottom third for one-handed thumb reach. Body ≥16px, step
-instruction ≥20px. `navigator.wakeLock` held for the night phase, with a documented
-fallback. Breakpoints 480 / 768 / 1024; desktop shows Grimoire and current step side
-by side. Portrait-primary on mobile.
+Dark theme only, with `<meta name="theme-color">`, `color-scheme: dark` and a
+background set in `index.html` — otherwise iOS paints a white chrome bar and a white
+flash on every cold load, in a dim room. Touch targets ≥48×48px (satisfies both
+Apple's 44 and Material's 48) with ≥8px separation. Destructive actions never
+adjacent to frequent ones. Primary night controls in the bottom third. Body ≥16px,
+step instruction ≥20px.
+
+`navigator.wakeLock` (Chrome Android 84+, iOS Safari 16.4+) **re-acquired on
+`visibilitychange`** — it is auto-released whenever the document hides and does not
+return on its own, so v2's "held for the night phase" was decorative after the first
+app switch. Released when the panic blank is showing. Fallback where unsupported:
+a one-time card saying "set auto-lock to Never". There is no good programmatic one.
+
+Portrait is the designed layout; landscape degrades gracefully. It cannot be
+enforced — `screen.orientation.lock()` does not exist on iOS Safari.
+
+One column at every width, with a max-width on desktop. (v2's 480/768/1024
+breakpoints and desktop split-pane are cut — a second layout to maintain for a tool
+used on a phone.)
 
 ---
 
 ## 14. Testing
 
-**Coverage goal: every character, every state.** Each character in the edition gets
-its own test file asserting behaviour across the full matrix — in play / not in play,
-alive / dead, ability functional / poisoned / drunk, and every registration
-interaction it participates in. A character with no test file fails CI. This is the
-part of the suite that grows when a new edition is added, and it is the reason the
-edition boundary (§3.8) exists.
+Effort is allocated by **damage × how unlikely you are to notice**, which inverts
+v2's distribution. Vote math is the most self-correcting subsystem in the app — ten
+people just watched the hands go up and will recount out loud — and v2 spent a large
+share of its budget there. Positional information is the least: it corrupts every
+deduction chain silently, for the whole game.
 
-**Tier 1 — reducer and rules (Vitest).** Distribution legality per player count;
-Baron adjustment and draw order; **win conditions ×4 plus precedence**; Drunk wakes
-on their believed character's step; a real Empath and a Drunk-believing-Empath both
-wake at the same step; ability gating (poisoned Monk does not protect, poisoned
-Virgin does not fire, **poisoned Recluse still registers ambiguously**); status
-expiry after the source dies; Ravenkeeper wakes only if killed *this* night and not
-if the Monk blocked it; a player killed at the Imp step is not woken for Empath;
-starpass with and without a living Minion; Scarlet Woman promotion via daytime
-execution; Chef circular adjacency and *k−1* runs; Empath dead-neighbour skipping;
-threshold at every alive count; Butler retroactive validation; two executions in one
-day; determinism (double-reduce and JSON round-trip); `Math.random`/`Date.now`
-stubbed to throw; advisory enforcement (an invalid Butler vote counts and emits
-`RULE_FLAGGED`; a spent dead vote counts and flags; a double nomination flags);
-engine purity (the `grep` gate in §3.8 returns nothing).
+v2 also closed by asserting "the reducer is the part least likely to fail — it is
+pure and easy." Its own change log is a ten-item list of rules bugs in the reducer.
+Purity buys testability, not correctness. That sentence is deleted.
 
-**Tier 2 — persistence.** Serialize → reload → replay is byte-identical; unknown
-future event type does not crash; schema mismatch handled; transactional undo drops
-a whole `txId`; edit-and-replay recomputes downstream correctly.
+**Tier 1 — property tests (highest value).**
+- Chef and Empath against a **separately written, deliberately naive reference
+  implementation**, over generated circles (7–15 seats, random evil placements,
+  random dead sets). Covers wrap-around and all-adjacent edges no example set will.
+- **Status-timeline invariants** over generated traces: no player carries `poisoned`
+  into day N+1 from a night-N Poisoner; protection never survives dawn; expiry is
+  independent of whether the source is alive.
+- Reducer determinism: double-reduce and JSON round-trip deep-equal;
+  `applyEvent` returns referentially-identical untouched sub-objects; `Math.random`
+  and `Date` stubbed to throw.
+- Advisory invariants: no sequence of flagged events can make `aliveCount` negative,
+  produce two living Demons, or kill a dead player.
 
-**Tier 3 — E2E (Playwright).** Full 8-player game happy path. Spy Mode → refresh →
-still in Spy Mode. Spy Mode → back button → still in Spy Mode. Kill the tab
-mid-night-step → resume lands on the same step. Undo a mistapped Poisoner target and
-confirm the log shows the correction. The canary test for `toSpyView`.
+**Tier 2 — the rules cases that bit v1 and v2.**
+Distribution ×11 counts; Baron draw order; bluffs suppressed below 7; Drunk wakes at
+their believed step and both Empaths wake separately; `requiresAlive` — Ravenkeeper
+gets info while dead, Saint execution wins for evil, poisoned Saint does not;
+poisoned Monk does not protect; poisoned Virgin does not fire but still consumes the
+ability; **poisoned Recluse still registers ambiguously**; poisoned Imp's kill does
+nothing; Monk-protected Imp self-target does not starpass; starpass with no living
+Minion; Scarlet Woman at exactly 5 including the dying Demon, promoted by a *daytime*
+execution, and notified the following night; Slayer on a Recluse ruled as Demon
+promotes nobody; win precedence (Demon death to 2 alive → good); Mayor win requires
+`todaysExecutions.length === 0`; threshold at three representative counts; invalid
+Butler vote **counts** and flags; cursor terminates when every step is skipped; the
+`stepIds` frozen-list snapshot.
 
-The reducer is the part *least* likely to fail — it is pure and easy. The UI is
-where a tired Storyteller loses a game, which is why Tier 3 exists.
+**Tier 3 — three browser tests only** (nothing else can assert these): Spy Mode
+survives refresh; Spy Mode survives Back; resume lands on the same step. Use
+`page.clock` to fast-forward holds. The full-game Playwright walkthrough is cut in
+favour of a fast headless scripted game driving the command layer — same rules
+coverage, no flake.
+
+**Tier 4 — a written manual device checklist**, run once on a real iPhone and a real
+Android: back-swipe leak, tab discard resume, wake lock across an app switch,
+private-browsing detection, panic blank, export via the share sheet. None of these
+are reachable from Playwright's WebKit build.
+
+No per-character-file CI gate: an empty file passes it, and it is the gate that gets
+`--no-verify`'d in month two.
 
 ---
 
 ## 15. Delivery slices
 
-**Slice 1 — usable alone at a real table.** Players → deal → Grimoire → night engine
-(both orders, all info, statuses, deaths, §4 predicates) → transactional undo →
-persistence with failure banner → **minimal Spy Mode**.
+**Slice 1 — a complete, playable tool.** Setup, deal, seating confirmation,
+Grimoire with show-your-working, the full night engine, **the full day phase**
+(nominations, votes, thresholds, execution, Virgin, Slayer), win conditions,
+transactional undo, advisory enforcement, persistence with offline/PWA and
+export/import, and Spy Mode with the §10.3 hardening.
 
-Spy Mode belongs in Slice 1 counterintuitively: at that point there are no notes and
-no lies ledger, so the Spy view is *approximately* the Grimoire view and is nearly
-free — and building it now forces the module boundary and the `SpyView` type into
-existence **before** the private data it must exclude exists. Retrofitting a security
-boundary onto a component tree that wasn't designed for one is how this feature
-ships broken.
+Spy Mode is in Slice 1 for a structural reason: the boundary and the `SpyView` type
+must exist *before* the private data they exclude does. Because Slice 2 adds that
+data, seed one placeholder secret field in `GameState` in Slice 1 so the canary test
+is live from day one rather than vacuously passing.
 
-The day phase is *not* in Slice 1: nominations and votes are the part a Storyteller
-can genuinely do on paper (guide §5 suggests exactly that), it carries the fiddliest
-rule surface, and it is the least cognitively loaded part of running the game. The
-night is where the hidden arithmetic happens under pressure.
-
-The edition boundary (§3.8) is established in Slice 1, not retrofitted — it costs
-almost nothing while the first edition is being written and is expensive to impose
-afterwards, which is exactly the shape of the Spy Mode argument above.
-
-**Slice 2 —** day phase (nominations, votes, thresholds, execution, Virgin, Slayer)
-plus win-condition checking.
-
-**Slice 3 —** notes, claims, timeline, lies and registration ledgers, export,
-post-game summary.
+**Slice 2 — the memory layer.** Notes, structured claims, timeline UI, lies /
+overrides / registration ledgers, post-game summary.
 
 ---
 
 ## 16. Rulings the engine hardcodes
 
-Every one of these is a judgment call with a defensible alternative. They are
-recorded here so the implementation has a single source of truth and the tests have
-something to assert against.
-
-1. **Scarlet Woman alive count** — the dying Demon **counts** toward the 5 (§4.6).
-2. **Spy Mode fidelity** — physical-Grimoire fidelity: red herring, demon bluffs and
-   the Drunk's believed character are **shown**; notes and analysis never are (§10).
+1. **Scarlet Woman alive count** — the dying Demon **counts** toward the 5.
+2. **Spy Mode fidelity** — red herring, demon bluffs and the Drunk's believed
+   character are shown. Note the stated rationale is imperfect: a physical Grimoire
+   holds the red herring and Drunk tokens, but the bluffs are shown to the Demon and
+   set aside. Game impact is near zero (the Demon already knows their own bluffs).
 3. **Butler enforcement** — an invalid Butler vote **counts**; the app notifies you
-   that a rule was broken and logs it. It never auto-strikes a raised hand. This is
-   an instance of the general advisory-enforcement rule (§7).
-4. **Spy Mode exit** — hold-to-exit for 2 seconds, no PIN (§10).
-5. **Two executions in one day** — the day continues after a Virgin trigger, and the
-   Storyteller **chooses** which execution the Undertaker learns (§7).
-6. **Registration consistency** — the app **flags** an inconsistency
-   ("you registered the Recluse as evil to the Empath on night 2") but never blocks
-   it. You are allowed to be inconsistent; you should just know that you are (§4.3).
-7. **Mayor bounce** — the bounce victim must be alive and must not be the Mayor or
-   the attacking Demon. Protection and Soldier are **re-checked on the bounce
-   target**, so a bounce onto a protected player kills no one (§4.5).
+   and logs it. Two reasons, the second decisive: (a) once the hand is up the rule is
+   already broken and the app cannot un-break it; (b) **striking the vote leaks the
+   role** — the announced tally would not match the hands the table just watched go
+   up, and they would deduce the Butler from the discrepancy. Enforcement stays with
+   the Butler, and the Storyteller keeps override control.
+4. **Spy Mode exit** — hold-to-exit 2s on a corner control, no PIN.
+5. **Two executions in one day** — the day continues after a Virgin trigger; you
+   choose which execution the Undertaker learns.
+6. **Registration consistency** — flagged, never blocked.
+7. **Mayor bounce** — victim must be alive, not the Mayor, not the attacking Demon;
+   protection and Soldier are re-checked on the bounce target.
+8. **Execution finality** — once a nomination is the unique highest and meets
+   threshold, that player is executed; there is no legal skip at that point.
+9. **Starpass beats Scarlet Woman.** When the Imp self-kills at 5+ alive with a
+   living Scarlet Woman, both trigger and the starpass branch wins — you may hand the
+   Imp to any living Minion, not necessarily her. Contested; the alternative is that
+   her non-optional ability pre-empts the choice.
+10. **Poisoned Virgin** still consumes the ability on the first nomination.
+11. **Monk-protected Imp targeting itself** does not starpass.
+12. **A Recluse may register as the Demon and die to the Slayer** — without
+    promoting anyone (§4.6).
 
-## 17. Change log from v1
+## 17. Change log
 
-Fixed: Drunk never waking (§4.1); no win-condition engine (§4.7); night queue built
-too early (§6.1); "the app computes the true answer" (§4.3); non-transactional undo
-(§3.2, §3.4); status expiry tied to a living source (§4.4); Soldier and Mayor absent
-entirely (§4.5); Scarlet Woman with no daytime path (§4.6); ability effects not gated
-by poison/drunk (§4.2); no event envelope or timestamps (§3.2); `DEATH.cause:'virgin'`
-breaking the Saint check (§3.6); no `characterIdAtDeath` for the Undertaker (§3.6);
-claims as free text (§9); Grimoire screen unspecified (§8); no mid-game corrections or
-player add/remove (§3.4, §3.6); localStorage failure modes (§12); Spy Mode defeated by
-refresh and Back (§10); no shoulder-surfing defence (§11); responsive requirement
-unspecified (§13); testing limited to the reducer (§14); single undifferentiated
-delivery (§15).
+**v3 fixes** (from a five-lens review): Ravenkeeper and Saint disabled by
+`abilityFunctional` (§4.2); Slayer-on-Recluse promoting the Scarlet Woman (§4.6);
+`checkVictory` specified per-event and per-transaction (§4.7); kill-resolution
+pseudocode contradicting its own prose (§4.5); the Imp step never marked settled and
+the cursor looping on skip (§6.1); group steps unselectable and `Set` of tuples
+(§3.7, §6.1); `DAY_CLOSED` singular breaking the Mayor win (§3.6); `aliveCount == 2`
+stepped over by player removal (§4.7); Scarlet Woman notification unreachable across
+a day boundary (§6.3); the perceived-character invariant unstated (§4.1); advisory
+enforcement not applied at night (§4.8); dead Butler contradiction (§4.2); demon
+bluffs losing their 7+ qualifier (§5). **Deleted as unsound or inert:**
+edit-and-replay, `EVENT_CORRECTED`, the seeded PRNG, the CI grep gate, the
+per-character test gate, the full-game E2E, the volume-key panic blank, the 45s
+auto-blank, the redacted Grimoire, desktop breakpoints. **Added:** show-your-working
+(§8.2), `st_override` (§4.3), offline/PWA (§12), import (§12.6), the screen inventory
+and Reference screen (§8.1), seating confirmation (§5.5), the guarded Spy handover
+(§10.3), and the known-edition-debt table (§3.8).
+
+**v2 fixed** (from a three-lens review): the Drunk never waking; no win-condition
+engine; the night queue built before mid-night conditions were knowable; "compute the
+true answer" with a Recluse or Spy in play; non-transactional undo; status expiry
+tied to a living source; the Soldier and Mayor absent entirely; Scarlet Woman with no
+daytime path; ability effects ungated by poison/drunk.
 
 ## 18. Out of scope
 
 Custom scripts, Travellers, Fabled, multiplayer or networked play, accounts,
-multi-game archive. **No** live Spy link on a second device — same-device only.
-Consequence of no backend: a dead battery can lose the game, mitigated by §12's dawn
-auto-export prompt, not eliminated.
+multi-game archive, a live Spy link on a second device, practice mode, a
+paper-handoff snapshot screen. **Never** put game state in a URL fragment or query
+string — it would land in history, the address bar and autocomplete.
 
-**Other editions are out of scope to *build*, not to *accommodate*.** No Bad Moon
-Rising or Sects & Violets content ships in this version, and no engine work is done
-speculatively on their behalf. What is in scope is the boundary in §3.8 that keeps
-them cheap to add later.
+Other editions are out of scope to *build*, not to *accommodate*: no other-edition
+content ships and no engine work is done speculatively, but edition data is isolated
+and the known debt is written down (§3.8).

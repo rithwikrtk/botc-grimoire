@@ -9,4 +9,4 @@ can hand to the Spy.
 
 - Design spec: [`docs/superpowers/specs/2026-09-07-botc-storyteller-app-design.md`](docs/superpowers/specs/2026-09-07-botc-storyteller-app-design.md)
 
-Status: **design approved-in-progress, no implementation yet.**
+Status: **design v3, no implementation yet.**
