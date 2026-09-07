@@ -260,15 +260,43 @@ export function applyVirgin(
   });
 }
 
+/**
+ * §7, §16.12. Requires the phase to be day (review round 2, FIX 1a) — matching
+ * `applyVirgin`/`closeDay`/`beginNight` in this file. `evaluateSlayer`'s own
+ * day check answers "what would happen"; this one decides whether the claim
+ * may run at all. That distinction matters because the reducer's
+ * `slayerUsed` is set purely from `claimantIsRealSlayer`, with no reference to
+ * `outcome` or the phase — so without this guard, a night claim from a real,
+ * functional Slayer would silently burn the once-per-game shot on a claim
+ * that was never actually made at the table.
+ *
+ * Also refuses when the target's registration is ambiguous and undecided
+ * (review round 2, FIX 1b): resolving anyway would likewise spend a real,
+ * functional, unspent Slayer's shot on a claim nobody has ruled on yet. This
+ * is the ONE guard that refuses rather than records — a bluffing claimant, an
+ * already-spent or non-functional Slayer, and an already-dead target all
+ * still resolve to `outcome: 'nothing'` and get recorded, per §4.8, because
+ * nothing about THEIR resolution depends on a ruling the Storyteller has not
+ * made yet.
+ */
 export function claimSlayer(
   store: Store,
   claimantId: PlayerId,
   targetId: PlayerId,
   opts: { ruleTargetAsDemon?: boolean } = {},
 ): TransactionResult {
+  if (store.getState().phase.kind !== 'day') throw new Error('It is not day');
+
   const view = toRulesView(store.getState());
   const evaluation = evaluateSlayer(view, claimantId, targetId, opts);
   const target = view.players.find((p) => p.id === targetId)!;
+
+  if (evaluation.needsRegistrationRuling) {
+    throw new Error(
+      `claimSlayer needs a ruling on ${target.name}: pass { ruleTargetAsDemon: true } or ` +
+        '{ ruleTargetAsDemon: false } before resolving',
+    );
+  }
 
   return store.transaction('a Slayer claim', (tx) => {
     tx.emit('SLAYER_CLAIMED', {

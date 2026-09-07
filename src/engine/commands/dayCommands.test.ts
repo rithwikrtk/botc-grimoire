@@ -4,6 +4,7 @@ import {
   applyVirgin,
   beginNight,
   castVote,
+  claimSlayer,
   closeDay,
   closeNomination,
   endGame,
@@ -159,6 +160,83 @@ function seededWithButlerMaster(masterId: string): Store {
   return store;
 }
 
+/**
+ * Same shape as `ROLES`, with the Virgin in p4 instead of the Chef. Review
+ * round 2, folded-in minor 6 — the phase-guard test needs a real Virgin in
+ * play so it can prove `todaysExecutions` stays empty after the throw, not
+ * just that the guard fired; a roster without a Virgin cannot make that
+ * promise, since applyVirgin would refuse for a second reason regardless.
+ */
+const VIRGIN_ROLES: Array<[string, string]> = [
+  ['p1', 'imp'],
+  ['p2', 'poisoner'],
+  ['p3', 'butler'],
+  ['p4', 'virgin'],
+  ['p5', 'empath'],
+  ['p6', 'monk'],
+  ['p7', 'soldier'],
+];
+
+/**
+ * Same seven-seat shape, with a real Slayer (p3) and a Recluse (p4) — the
+ * roster FIX 1b's test needs: a functional, unspent Slayer aiming at a
+ * living target who is genuinely ambiguous (§16.12), so the new
+ * needsRegistrationRuling throw is what fires, not one of the four guards
+ * that also produce `outcome: 'nothing'`.
+ */
+const SLAYER_ROLES: Array<[string, string]> = [
+  ['p1', 'imp'],
+  ['p2', 'poisoner'],
+  ['p3', 'slayer'],
+  ['p4', 'recluse'],
+  ['p5', 'empath'],
+  ['p6', 'monk'],
+  ['p7', 'soldier'],
+];
+
+function seededAtNightWithVirgin(): Store {
+  let tick = 1_700_000_000_000;
+  const store = createStore([], () => (tick += 1000));
+  store.transaction('create', (tx) => {
+    tx.emit('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: VIRGIN_ROLES.map(([id], seat) => ({ id, name: `P${seat + 1}`, seat })),
+    });
+    tx.emit('ROLES_ASSIGNED', {
+      assignments: Object.fromEntries(VIRGIN_ROLES),
+      distribution: { townsfolk: 4, outsider: 1, minion: 1, demon: 1 },
+      setupModifiers: [],
+      demonBluffs: null,
+      drunkBelief: null,
+      redHerring: null,
+    });
+    tx.emit('PHASE_ADVANCED', { phase: 'night', number: 1 });
+  });
+  return store;
+}
+
+function seededWithSlayerAndRecluse(): Store {
+  let tick = 1_700_000_000_000;
+  const store = createStore([], () => (tick += 1000));
+  store.transaction('create', (tx) => {
+    tx.emit('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: SLAYER_ROLES.map(([id], seat) => ({ id, name: `P${seat + 1}`, seat })),
+    });
+    tx.emit('ROLES_ASSIGNED', {
+      assignments: Object.fromEntries(SLAYER_ROLES),
+      distribution: { townsfolk: 4, outsider: 1, minion: 1, demon: 1 },
+      setupModifiers: [],
+      demonBluffs: null,
+      drunkBelief: null,
+      redHerring: null,
+    });
+    tx.emit('PHASE_ADVANCED', { phase: 'night', number: 1 });
+    tx.emit('PHASE_ADVANCED', { phase: 'day', number: 1 });
+  });
+  return store;
+}
+
 function seededWithScarletWoman(): Store {
   let tick = 1_700_000_000_000;
   const store = createStore([], () => (tick += 1000));
@@ -301,14 +379,40 @@ describe('day commands (§4.8, §7)', () => {
     expect(() => closeDay(store)).toThrow(/it is not day/i);
   });
 
-  // Pre-review correction: nominationIssues has no phase check of any kind, so
-  // nominate + applyVirgin at night was fully reachable with no friction, and a
-  // night trigger injects a phantom execution into that very night's Undertaker
-  // answer set (todaysExecutions is cleared only on entry into a day). The
-  // nomination stays reachable at night — only the derived death is refused.
-  it('refuses to apply the Virgin outside of the day', () => {
+  // Pre-review correction, folded-in minor 6: nominationIssues has no phase
+  // check of any kind, so nominate + applyVirgin at night was fully reachable
+  // with no friction, and a night trigger injects a phantom execution into
+  // that very night's Undertaker answer set (todaysExecutions is cleared only
+  // on entry into a day). The nomination stays reachable at night — only the
+  // derived death is refused. Uses a roster with a REAL Virgin (p4) and
+  // asserts todaysExecutions stays empty, so this proves the consequence the
+  // guard exists for, not just that the guard fired.
+  it('refuses to apply the Virgin outside of the day, leaving no phantom execution', () => {
+    const store = seededAtNightWithVirgin();
+    expect(() => applyVirgin(store, 'p5', 'p4')).toThrow(/it is not day/i);
+    expect(store.getState().todaysExecutions).toEqual([]);
+  });
+
+  // Review round 2, FIX 1a — symmetric with applyVirgin's guard above: the
+  // reducer's slayerUsed is set purely from claimantIsRealSlayer, with no
+  // reference to phase, so a night claim from a real Slayer would otherwise
+  // silently burn the once-per-game shot on a claim never actually made at
+  // the table.
+  it('refuses to claim the Slayer outside of the day', () => {
     const store = seededAtNight();
-    expect(() => applyVirgin(store, 'p4', 'p1')).toThrow(/it is not day/i);
+    expect(() => claimSlayer(store, 'p4', 'p1')).toThrow(/it is not day/i);
+  });
+
+  // Review round 2, FIX 1b — the worse half. p3 is a real, functional, unspent
+  // Slayer (confirmed below); p4 (Recluse) is alive and genuinely ambiguous
+  // (canRuleAsDemon). Without the new guard this would resolve to
+  // `outcome: 'nothing'` and still set slayerUsed, so the assertion on
+  // slayerUsed is what proves the shot was never spent, not merely that some
+  // error was thrown.
+  it('refuses to resolve a Slayer claim against an undecided ambiguous target', () => {
+    const store = seededWithSlayerAndRecluse();
+    expect(() => claimSlayer(store, 'p3', 'p4')).toThrow(/ruling/i);
+    expect(store.getState().players.find((p) => p.id === 'p3')?.slayerUsed).toBe(false);
   });
 
   // Review round 1, FIX 2 — the only command-layer exercise of the §16.3 ruling's

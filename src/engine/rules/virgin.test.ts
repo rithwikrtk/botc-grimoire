@@ -40,17 +40,24 @@ describe('evaluateVirgin (§7, §11 of the guide, §16.10)', () => {
   });
 
   it('does not fire when the Demon nominates', () => {
-    expect(evaluateVirgin(toRulesView(day().state), 'p1', 'p4')).toMatchObject({
+    const result = evaluateVirgin(toRulesView(day().state), 'p1', 'p4');
+    expect(result).toMatchObject({
       consumed: true,
       fired: false,
     });
+    // Folded-in minor 4 — `consumed`/`fired` alone are also produced by the
+    // poisoned-Virgin and already-triggered guards; the reason is what proves
+    // THIS guard (not a Townsfolk) fired.
+    expect(result.reason).toMatch(/not a Townsfolk/i);
   });
 
   it('does not fire for an Outsider nominator', () => {
-    expect(evaluateVirgin(toRulesView(day().state), 'p6', 'p4')).toMatchObject({
+    const result = evaluateVirgin(toRulesView(day().state), 'p6', 'p4');
+    expect(result).toMatchObject({
       consumed: true,
       fired: false,
     });
+    expect(result.reason).toMatch(/not a Townsfolk/i);
   });
 
   // §16.10 — poison silently disables the ability but still consumes it.
@@ -98,5 +105,32 @@ describe('evaluateVirgin (§7, §11 of the guide, §16.10)', () => {
 
   it('does not offer a ruling for a Recluse, who cannot register as a Townsfolk', () => {
     expect(evaluateVirgin(toRulesView(day().state), 'p6', 'p4').needsRegistrationRuling).toBe(false);
+  });
+
+  // Folded-in minor 8 — the tri-state at virgin.ts distinguishes `undefined`
+  // (not yet decided, needsRegistrationRuling: true, per the Spy test above)
+  // from an explicit `false` (decided NOT to rule as Townsfolk, so there is
+  // nothing left to ask). Collapsing that distinction to "anything but true"
+  // would make this test, and only this test, red.
+  it('does not ask for a ruling again once the Storyteller has declined it', () => {
+    const view = toRulesView(day().state);
+    const declined = evaluateVirgin(view, 'p3', 'p4', { ruleNominatorAsTownsfolk: false });
+    expect(declined).toMatchObject({ fired: false, needsRegistrationRuling: false });
+  });
+
+  // Folded-in minor 5, §4.1 — a Drunk who believes they are the Virgin has no
+  // ability, and nominating them must not look like nominating the Virgin.
+  // Reading `perceivedCharacterId` instead of the true `characterId` at
+  // virgin.ts would leave every other test in this file green, because no
+  // fixture here has a Drunk or a drunkBelief.
+  it('does not treat a Drunk who believes they are the Virgin as the Virgin (§4.1)', () => {
+    const rolesWithDrunk: Array<[string, string]> = [...ROLES, ['p8', 'drunk']];
+    const b = buildGame({
+      roles: rolesWithDrunk,
+      drunkBelief: { playerId: 'p8', believesCharacterId: 'virgin' },
+      upTo: { kind: 'day', number: 1 },
+    });
+    const result = evaluateVirgin(toRulesView(b.state), 'p5', 'p8');
+    expect(result.isVirginNomination).toBe(false);
   });
 });
