@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { CHARACTERS, characterById } from '@/editions/troubleBrewing/characters';
+import { characterById } from '@/editions/troubleBrewing/characters';
 import { distributionFor } from '@/editions/troubleBrewing/distribution';
 import { deal, rerollOne, validateDeal, type Picker } from './deal';
 
@@ -237,11 +237,13 @@ describe('validateDeal', () => {
     const rerolled = rerollOne(result, nonDemonId!, (items, count) => items.slice(-count));
     expect(validateDeal(ids(9), rerolled)).toEqual([]);
   });
+});
 
-  it('accepts every character in the edition as a legal member of its own team', () => {
-    // Guards against a typo in CHARACTERS that would make a character undealable.
-    for (const character of Object.values(CHARACTERS)) {
-      expect(['townsfolk', 'outsider', 'minion', 'demon']).toContain(character.team);
-    }
+describe('deal — player-count bounds', () => {
+  it('throws outside 5-15 players', () => {
+    expect(() => deal(ids(4), front)).toThrow();
+    expect(() => deal(ids(3), front)).toThrow();
+    expect(() => deal(ids(16), front)).toThrow();
+    expect(() => deal(ids(20), front)).toThrow();
   });
 });

@@ -21,6 +21,13 @@ import type { CharacterId, DerivationLine, DrunkBelief, PlayerId } from '@/engin
  */
 export type Picker = <T>(items: readonly T[], count: number) => T[];
 
+/**
+ * `TeamCounts`' fields are readonly and its objects are deep-frozen (Task 2), so
+ * every running total in this file is built up in one of these before being
+ * handed back as a plain `TeamCounts` once construction is done.
+ */
+type MutableTeamCounts = { -readonly [K in keyof TeamCounts]: TeamCounts[K] };
+
 export function randomPicker(): Picker {
   return <T,>(items: readonly T[], count: number): T[] => {
     const pool = items.slice();
@@ -49,7 +56,7 @@ function applyModifiers(
   const setupModifiers: DealResult['setupModifiers'] = [];
   // Mutable working copy: TeamCounts' fields are readonly (Task 2), so the
   // running total is built here and only handed back as TeamCounts once done.
-  const distribution: { -readonly [K in keyof TeamCounts]: TeamCounts[K] } = { ...base };
+  const distribution: MutableTeamCounts = { ...base };
   for (const character of drawn) {
     if (!character.setupModifiers) continue;
     setupModifiers.push({ characterId: character.id, teamDeltas: character.setupModifiers });
@@ -176,7 +183,7 @@ export function rerollOne(
   const drawn = Object.values(assignments).map(characterById);
   const base = distributionFor(Object.keys(assignments).length);
   const { distribution, setupModifiers } = applyModifiers(base, drawn);
-  const nextInPlay = new Set(assignments ? Object.values(assignments) : []);
+  const nextInPlay = new Set(Object.values(assignments));
 
   const drunkPlayerId = Object.entries(assignments).find(([, c]) => c === 'drunk')?.[0] ?? null;
   const beliefStillLegal =
@@ -281,7 +288,7 @@ export function validateDeal(playerIds: readonly PlayerId[], result: DealResult)
     if (count > 1) issues.push(`${characterById(characterId).name} is assigned twice.`);
   }
 
-  const counts: { -readonly [K in keyof TeamCounts]: TeamCounts[K] } = {
+  const counts: MutableTeamCounts = {
     townsfolk: 0,
     outsider: 0,
     minion: 0,
@@ -305,7 +312,7 @@ export function validateDeal(playerIds: readonly PlayerId[], result: DealResult)
   // produce.
   if (playerIds.length >= MIN_PLAYERS && playerIds.length <= MAX_PLAYERS) {
     const drawn = Object.values(result.assignments).filter((id) => CHARACTERS[id]).map(characterById);
-    const expected: { -readonly [K in keyof TeamCounts]: TeamCounts[K] } = {
+    const expected: MutableTeamCounts = {
       ...distributionFor(playerIds.length),
     };
     for (const character of drawn) {
