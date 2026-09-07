@@ -378,23 +378,54 @@ export const fortuneTellerAnswers: Resolver = (view, _actorId, targets = []) => 
 export const undertakerAnswers: Resolver = (view) =>
   // §16.5 — a Virgin trigger plus a vote execution means two, and the Storyteller
   // chooses which one the Undertaker learns.
-  view.todaysExecutions.map((execution) => {
+  view.todaysExecutions.flatMap((execution) => {
     const player = view.players.find((p) => p.id === execution.playerId);
-    return answer(
-      `undertaker:${execution.playerId}`,
-      execution.characterIdAtDeath,
-      characterById(execution.characterIdAtDeath).name,
-      [
-        {
-          label: 'executed today',
-          detail: `${player?.name ?? execution.playerId} (${execution.kind})`,
-        },
-        {
-          label: 'result',
-          detail: `true character at death -> ${characterById(execution.characterIdAtDeath).name}`,
-        },
-      ],
-    );
+    const name = player?.name ?? execution.playerId;
+    const trueCharacter = characterById(execution.characterIdAtDeath);
+    const executedLine: DerivationLine = {
+      label: 'executed today',
+      detail: `${name} (${execution.kind})`,
+    };
+    const answers: LegalAnswer[] = [
+      answer(
+        `undertaker:${execution.playerId}`,
+        execution.characterIdAtDeath,
+        trueCharacter.name,
+        [
+          executedLine,
+          {
+            label: 'result',
+            detail: `true character at death -> ${trueCharacter.name}`,
+          },
+        ],
+      ),
+    ];
+
+    // §4.3 — the Recluse "might register as evil, and as a Minion or Demon, EVEN
+    // IF DEAD"; the Spy's line says the same. That clause exists for exactly this
+    // ability, so the ruled answers must be enumerated here rather than left to
+    // `st_override`, which §4.3/§9 deliberately keep out of the registration
+    // ledger and so out of §16.6's contradiction check. Shaped exactly like
+    // `ravenkeeperAnswers` below, including the null-headed 2-tuple value.
+    for (const option of registrationOptionsForCharacterId(execution.characterIdAtDeath)) {
+      if (option.team === trueCharacter.team) continue;
+      answers.push(
+        answer(
+          `undertaker:${execution.playerId}:${option.team}`,
+          [null, execution.playerId],
+          `a ${option.team} of the Storyteller's choosing`,
+          [
+            executedLine,
+            {
+              label: 'registration ruling',
+              detail: `${name} ruled to register as ${option.team}; show a ${option.team} token not in play`,
+            },
+          ],
+          [{ playerId: execution.playerId, registersAs: option }],
+        ),
+      );
+    }
+    return answers;
   });
 
 /** §4.8 — soft constraints, same as the Fortune Teller. No target, no answers. */

@@ -355,6 +355,14 @@ export function validateDeal(playerIds: readonly PlayerId[], result: DealResult)
     if (Object.values(result.assignments).includes(result.drunkBelief.believesCharacterId)) {
       issues.push('The Drunk believes they are a character that is in play.');
     }
+    // §5.2, guide §13 — the Drunk "thinks they are a Townsfolk". Not decoration:
+    // a belief off the Townsfolk list makes `perceivedActors` return the Drunk
+    // alongside the real holder of that character, and because every night step
+    // is `per-night` scoped the real actor is never offered the step at all.
+    // A believed 'imp' therefore cancels the Demon kill in silence.
+    if (characterById(result.drunkBelief.believesCharacterId).team !== 'townsfolk') {
+      issues.push('The Drunk must believe they are a Townsfolk.');
+    }
   }
 
   if (result.demonBluffs) {

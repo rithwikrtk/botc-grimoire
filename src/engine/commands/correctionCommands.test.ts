@@ -195,6 +195,18 @@ describe('recordDeath (§18)', () => {
     recordDeath(store, 'p6', 'other');
     const player = store.getState().players.find((p) => p.id === 'p6')!;
     expect(player.alive).toBe(false);
+    // §18 — "leaving them seated". This assertion stands for the SEAT
+    // IMMUTABILITY half only, and it cannot fail: `seat` is written in exactly
+    // one place (applyEvent.ts's GAME_CREATED case) and the event catalogue has
+    // no reseat/add/remove event, so the absence of a write path — not this
+    // line — is what enforces §18, and that is stronger than any test. What
+    // stands behind "the catalogue has no such event" is the frozen event-type
+    // list in reducer/applyEvent.test.ts, which reddens the moment one is added.
+    // The OTHER half §18 implies — that `seat`, not array position, is what
+    // defines the ring — is a live, testable property and is covered by
+    // selectors/seating.test.ts' "the ring is defined by seat, not by array
+    // position", which reddens when `bySeat`'s sort is removed. Neither claim
+    // rests on this line; it is kept as a readable statement of intent.
     expect(player.seat).toBe(5);
     expect(store.getState().deaths[0]).toMatchObject({ cause: 'other' });
   });

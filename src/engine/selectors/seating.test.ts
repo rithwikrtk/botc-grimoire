@@ -1,7 +1,8 @@
 import { describe, expect, it } from 'vitest';
-import { buildGame } from '@test/helpers/game';
+import { LogBuilder, buildGame } from '@test/helpers/game';
 import { referenceChefPairs } from '@test/helpers/reference';
 import { toRulesView } from './rulesView';
+import { bySeat } from './players';
 import {
   aliveNeighbours,
   chefDerivation,
@@ -25,6 +26,93 @@ function ring(characters: string[], dead: number[] = []) {
   }
   return toRulesView(builder.state);
 }
+
+/**
+ * FIX 4b — the one place the ring is materialised, and until now it was
+ * untested: `bySeat`'s `.sort((a, b) => a.seat - b.seat)` was deletable with the
+ * whole suite green, because EVERY fixture in the tree builds `GAME_CREATED`
+ * with `seat: index`, so `state.players` already happens to be seat-ordered and
+ * the sort never does anything.
+ *
+ * §8.2 names "a seating order entered wrong on night zero" as the failure "no
+ * unit test can ever reach". This one reaches it: `GAME_CREATED.players` carries
+ * `seat` in its payload, so a hand-built or IMPORTED log (Plan 3 imports event
+ * logs) can list the players in any order it likes. If `seat` stopped defining
+ * the ring, every Chef and Empath answer would silently change for the whole
+ * game.
+ *
+ * The fixture is chosen so array order and seat order give DIFFERENT answers for
+ * every assertion below — otherwise this would be another test that cannot fail.
+ *
+ *   array order:  empath  chef  imp   monk  poisoner soldier mayor
+ *   seat:            2      3    0      4      1        5      6
+ *   by seat:      imp  poisoner empath chef  monk  soldier mayor
+ *
+ * By SEAT the two evils sit together (1 Chef pair) and the Empath's neighbours
+ * are the Poisoner and the Chef (Empath 1). By ARRAY POSITION the evils are two
+ * apart (0 Chef pairs) and the Empath's neighbours are the Mayor and the Chef
+ * (Empath 0). Every assertion therefore has a distinct wrong answer to fail to.
+ */
+describe('the ring is defined by seat, not by array position (§8.2, §18)', () => {
+  /** [id, character, seat] listed in a deliberately non-seat array order. */
+  const SCRAMBLED: Array<[string, string, number]> = [
+    ['p3', 'empath', 2],
+    ['p4', 'chef', 3],
+    ['p1', 'imp', 0],
+    ['p5', 'monk', 4],
+    ['p2', 'poisoner', 1],
+    ['p6', 'soldier', 5],
+    ['p7', 'mayor', 6],
+  ];
+
+  function scrambledView() {
+    const builder = new LogBuilder();
+    builder.push('GAME_CREATED', {
+      edition: { id: 'troubleBrewing', version: '1' },
+      players: SCRAMBLED.map(([id, , seat]) => ({ id, name: id.toUpperCase(), seat })),
+    });
+    builder.push('ROLES_ASSIGNED', {
+      assignments: Object.fromEntries(SCRAMBLED.map(([id, character]) => [id, character])),
+      // 7 players: 5/0/1/1, the legal chart (guide §2).
+      distribution: { townsfolk: 5, outsider: 0, minion: 1, demon: 1 },
+      setupModifiers: [],
+      demonBluffs: null,
+      drunkBelief: null,
+      redHerring: null,
+    });
+    builder.push('PHASE_ADVANCED', { phase: 'night', number: 1 });
+    return toRulesView(builder.state);
+  }
+
+  it('keeps the players in the order GAME_CREATED listed them', () => {
+    // The premise of every assertion below: state.players is NOT seat-ordered,
+    // so a seat-blind implementation has something different to return.
+    expect(scrambledView().players.map((p) => p.id)).toEqual([
+      'p3', 'p4', 'p1', 'p5', 'p2', 'p6', 'p7',
+    ]);
+  });
+
+  it('orders bySeat and ringOrder by seat', () => {
+    const view = scrambledView();
+    expect(bySeat(view).map((p) => p.id)).toEqual(['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7']);
+    expect(bySeat(view).map((p) => p.seat)).toEqual([0, 1, 2, 3, 4, 5, 6]);
+    expect(ringOrder(view).map((p) => p.id)).toEqual(['p1', 'p2', 'p3', 'p4', 'p5', 'p6', 'p7']);
+  });
+
+  it('reads the Empath\'s neighbours off seats, not off array position', () => {
+    const view = scrambledView();
+    // Seats 1 (Poisoner, evil) and 3 (Chef, good). By array position they would
+    // be the Mayor and the Chef, both good, giving 0.
+    expect(aliveNeighbours(view, 'p3').map((p) => p.id)).toEqual(['p2', 'p4']);
+    expect(empathCount(view, 'p3')).toBe(1);
+  });
+
+  it('counts Chef pairs off seats, not off array position', () => {
+    // Seats 0 and 1 are the Imp and the Poisoner — adjacent. By array position
+    // they sit two apart and the answer would be 0.
+    expect(chefPairs(scrambledView())).toBe(1);
+  });
+});
 
 describe('chefPairs (§6.4, §8.2)', () => {
   it('counts zero when no evils are adjacent', () => {

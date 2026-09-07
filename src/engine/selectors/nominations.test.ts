@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { buildGame, type LogBuilder } from '@test/helpers/game';
 import { toRulesView } from '@/engine/selectors/rulesView';
 import { expiryFor } from '@/engine/phase';
+import { masterOf } from './statuses';
 import {
   butlerViolations,
   nominationIssues,
@@ -205,6 +206,31 @@ describe('voteIssues — the Butler ruling (§7, §16.3)', () => {
     const b = withButlerMaster('p5', { poison: 'p3' });
     b.push('VOTE_CAST', { nominationId: 'n1', voterId: 'p3' });
     expect(butlerViolations(b.state, 'n1')).toEqual([]);
+  });
+
+  // FIX 4a — the case the Master mark's lifetime makes reachable and nothing
+  // covered: the mark is applied on night N and expires at the END of day N, so
+  // a Butler who dies DURING day N (a Virgin trigger, a Slayer shot) still
+  // carries a live mark when they spend their ghost vote that same day. Without
+  // the exemption the vote lands in `butlerVotesFlagged` on the permanent
+  // record, which §4.2 names as a thing the previous version got wrong.
+  //
+  // The existing sibling above covers `voteIssues` with a Butler who dies before
+  // voting at all; this is the `butlerViolations` half, over a finished vote set
+  // that actually contains the ghost vote. Redden by: deleting the
+  // `if (!abilityFunctional(view, player)) return null;` line in
+  // `restrictedButlerMaster`.
+  it("does not report a Butler who dies during the day and then ghost-votes (§4.2, §7)", () => {
+    const b = withButlerMaster('p5');
+    b.push('DEATH', { playerId: 'p3', characterIdAtDeath: 'butler', cause: 'execution', executionKind: 'virgin' });
+    b.push('VOTE_CAST', { nominationId: 'n1', voterId: 'p3' });
+    b.push('VOTE_CAST', { nominationId: 'n1', voterId: 'p4' });
+    // The mark is still live — this is not vacuous because the Master expired.
+    expect(masterOf(toRulesView(b.state), 'p3')?.id).toBe('p5');
+    expect(b.state.players.find((p) => p.id === 'p3')?.alive).toBe(false);
+    // ...and p5, the Master, never voted.
+    expect(butlerViolations(b.state, 'n1')).toEqual([]);
+    expect(voteIssues(b.state, 'n1', 'p3').filter((i) => i.rule === 'butler_without_master')).toEqual([]);
   });
 
   it('ignores an expired Master mark from a previous night', () => {

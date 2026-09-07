@@ -77,9 +77,13 @@ function seeded(): Store {
  * headline is "the app never BLOCKS a rule break" (recorded + flagged, no
  * derived state change, is correct; refusing the action outright is the
  * violation). A bare `catch {}` cannot distinguish "this command legitimately
- * refused" (a backwards PHASE_ADVANCED, which is the only throw any of these
- * six action kinds can produce against this fixture) from "the reducer threw
- * where §4.8 requires it to swallow and flag instead" — and today NOTHING
+ * refused" from "the reducer threw where §4.8 requires it to swallow and flag
+ * instead". This used to name "a backwards PHASE_ADVANCED" as the legitimate
+ * refusal it cannot distinguish; that was wrong — `advance` computes `next`
+ * from the current phase, so this generator can never emit one, and the
+ * reducer's monotonicity guard is unreachable from here. Its real witness is
+ * `applyEvent.test.ts`' "refuses a PHASE_ADVANCED that goes backwards". Today
+ * NOTHING
  * among GAME_CREATED/ROLES_ASSIGNED/PHASE_ADVANCED/DEATH/NOMINATION_OPENED/
  * VOTE_CAST/ROLE_CHANGED throws for any input this generator can produce
  * (ids are always drawn from IDS, so `.find(...)!` never hits undefined, and
@@ -200,15 +204,23 @@ function invariants(state: GameState): void {
   }
 
   // Seating is immutable: the seats are always 0..n-1, each once (§18).
-  // Folded minor (a) — this clause is NOT witnessed by the fuzz: `seat` is
-  // written in exactly one place (applyEvent.ts's GAME_CREATED case), no event
-  // this generator can emit perturbs it, and the catalogue has no reseat/add/
-  // remove event at all. So this assertion is true because `seeded()`'s ring
-  // never changes, not because anything here exercises a guard — §18 is
-  // enforced by the ABSENCE of a write path, which is stronger than any test
-  // but means this clause would stay green even if it were deleted from every
-  // trace this fuzzer generates. Kept as a standing check in case a future
-  // event ever gains the ability to move a seat.
+  //
+  // This clause stands for SEAT IMMUTABILITY, and it is NOT witnessed by the
+  // fuzz: `seat` is written in exactly one place (applyEvent.ts's GAME_CREATED
+  // case), no event this generator can emit perturbs it, and the catalogue has
+  // no reseat/add/remove event at all. §18 is enforced by the ABSENCE of a write
+  // path, which is stronger than any test — and what witnesses that absence is
+  // the frozen event-type list in reducer/applyEvent.test.ts, which reddens if a
+  // seating- or roster-mutating event is ever added. Not this clause: it would
+  // stay green if deleted from every trace this fuzzer generates.
+  //
+  // It is emphatically NOT the witness for the other claim §18 implies — that
+  // `seat`, not array position, defines the ring. That one is live and testable
+  // and is covered by selectors/seating.test.ts' "the ring is defined by seat,
+  // not by array position", which reddens when `bySeat`'s sort is removed. An
+  // earlier note in the ledger named this clause as that witness; it is not.
+  // Kept as a standing check in case a future event ever gains the ability to
+  // move a seat.
   expect(state.players.map((p) => p.seat).sort((a, b) => a - b)).toEqual(
     state.players.map((_, index) => index),
   );

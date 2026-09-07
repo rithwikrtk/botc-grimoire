@@ -40,6 +40,22 @@ describe('§4.1 enforcement — where perceivedCharacterId may be imported', () 
     expect(messages.join('\n')).toMatch(/§4\.1/);
   });
 
+  // The barrel is NOT exempt. A Task 16 ruling REMOVED perceivedCharacterId and
+  // playersWithPerceivedCharacter from src/engine/index.ts "to turn a lint
+  // question into a compile error" — and that only holds while re-adding them
+  // is itself an error. eslint.config.js used to list the barrel in `ignores`,
+  // which meant a re-export would have linted clean and quietly re-opened the
+  // §4.1 laundering route the ruling closed. Redden by: restoring the
+  // 'src/engine/index.ts' entry to the `ignores` array in eslint.config.js.
+  it('rejects a re-export of the restricted names from the engine barrel', async () => {
+    const messages = await lint(
+      'src/engine/index.ts',
+      `export { perceivedCharacterId } from './selectors/players';\n`,
+    );
+    expect(messages.join('\n')).toMatch(/no-restricted-imports/);
+    expect(messages.join('\n')).toMatch(/§4\.1/);
+  });
+
   it('allows other imports from the same module', async () => {
     const messages = await lint(
       'src/engine/rules/demonKill.ts',

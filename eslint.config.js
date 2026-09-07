@@ -27,9 +27,6 @@ export default tseslint.config(
       'src/engine/selectors/nightCursor.ts',
       // The definition itself.
       'src/engine/selectors/players.ts',
-      // The barrel re-exports perceivedCharacterId for its two sanctioned
-      // consumers (wakes() and rendering); it must be able to do so itself.
-      'src/engine/index.ts',
       // Rendering is sanctioned by §4.1.
       'src/ui/**',
       // Tests assert the behaviour and must be able to call it.

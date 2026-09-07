@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { characterById } from '@/editions/troubleBrewing/characters';
+import { characterById, charactersByTeam } from '@/editions/troubleBrewing/characters';
 import { distributionFor } from '@/editions/troubleBrewing/distribution';
 import { deal, rerollOne, validateDeal, type Picker } from './deal';
 
@@ -186,6 +186,39 @@ describe('validateDeal', () => {
   it('rejects a Drunk in play with no belief recorded', () => {
     const result = deal(ids(9), preferring('drunk'));
     expect(validateDeal(ids(9), { ...result, drunkBelief: null }).join(' ')).toMatch(/drunk/i);
+  });
+
+  // §5.2, guide §13. The believed character must be a Townsfolk *and* not in
+  // play, and the two clauses are checked separately here so that neither can
+  // stand in for the other: this fixture picks a Minion that is NOT in play, so
+  // only the team clause can produce the message.
+  it('rejects a Drunk who believes they are an evil character', () => {
+    const result = deal(ids(9), preferring('drunk'));
+    const inPlay = new Set(Object.values(result.assignments));
+    const spareMinion = charactersByTeam('minion').find((c) => !inPlay.has(c.id));
+    expect(spareMinion).toBeDefined();
+    const issues = validateDeal(ids(9), {
+      ...result,
+      drunkBelief: { playerId: result.drunkBelief!.playerId, believesCharacterId: spareMinion!.id },
+    });
+    expect(issues).toContain('The Drunk must believe they are a Townsfolk.');
+    expect(issues).not.toContain('The Drunk believes they are a character that is in play.');
+  });
+
+  // The mirror of the above: a Townsfolk that IS in play, so only the in-play
+  // clause can produce the message. Together the pair pins both lines.
+  it('rejects a Drunk who believes they are a Townsfolk already in play', () => {
+    const result = deal(ids(9), preferring('drunk'));
+    const townsfolkInPlay = Object.values(result.assignments).find(
+      (c) => characterById(c).team === 'townsfolk',
+    );
+    expect(townsfolkInPlay).toBeDefined();
+    const issues = validateDeal(ids(9), {
+      ...result,
+      drunkBelief: { playerId: result.drunkBelief!.playerId, believesCharacterId: townsfolkInPlay! },
+    });
+    expect(issues).toContain('The Drunk believes they are a character that is in play.');
+    expect(issues).not.toContain('The Drunk must believe they are a Townsfolk.');
   });
 
   it('rejects a swap that changes the team counts with no Baron in play', () => {

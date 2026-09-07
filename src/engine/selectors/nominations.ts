@@ -83,9 +83,18 @@ function restrictedButlerMaster(
   player: RulesViewPlayer,
 ): RulesViewPlayer | null {
   if (player.characterId !== 'butler') return null;
-  // A dead Butler's ghost vote is unrestricted (§4.2, guide §12).
-  if (!player.alive) return null;
-  // A drunk or poisoned Butler's vote always counts (§7).
+  // A dead Butler's ghost vote is unrestricted (§4.2, guide §12) AND a drunk or
+  // poisoned Butler's vote always counts (§7) — one line covers both, because
+  // `abilityFunctional` already fails a dead Butler via `butler.requiresAlive`
+  // (characters.ts; pinned by characters.test.ts' requiresAlive sweep).
+  //
+  // There USED to be a separate `if (!player.alive) return null;` above this
+  // line. The whole-branch review read it as a correct-but-unwitnessed guard and
+  // asked for a test; it is neither. It was redundant, and no test could ever
+  // redden its deletion, because the line below already returns null for exactly
+  // the same inputs. Removing it makes the dead-Butler exemption witnessable for
+  // the first time — deleting THIS line now reddens the ghost-vote tests below
+  // (§4.2, §7) as well as the droisoned ones.
   if (!abilityFunctional(view, player)) return null;
   return masterOf(view, player.id);
 }

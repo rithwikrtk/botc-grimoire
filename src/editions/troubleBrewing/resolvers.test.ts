@@ -530,6 +530,65 @@ describe('undertakerAnswers (§16.5)', () => {
     expect(answers).toHaveLength(2);
     expect(answers.map((a) => a.value).sort()).toEqual(['investigator', 'washerwoman']);
   });
+
+  // FIX 2 (Important) — guide §1: the Recluse "might register as evil, and as a
+  // Minion or Demon, EVEN IF DEAD". That clause exists for this ability. Without
+  // an enumerated `registration` answer the only route is `st_override`, which
+  // §4.3/§9 keep out of the registration ledger, so §16.6's contradiction check
+  // could never see the most common ruling in the edition.
+  it('offers a registration answer per off-team option for an executed Recluse', () => {
+    const b = nine();
+    b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
+    b.push('DEATH', { playerId: 'p6', characterIdAtDeath: 'recluse', cause: 'execution', executionKind: 'vote' });
+    b.push('PHASE_ADVANCED', { phase: 'night', number: 2 });
+    const view = toRulesView(b.state);
+    const [canonical, ...ruled] = undertakerAnswers(view, 'p9');
+
+    expect(canonical).toMatchObject({ key: 'undertaker:p6', value: 'recluse', answerClass: 'canonical' });
+    expect(canonical?.registrationRulings).toEqual([]);
+
+    // The Recluse's two off-team options, each keyed by team.
+    expect(ruled.map((a) => a.key)).toEqual(['undertaker:p6:minion', 'undertaker:p6:demon']);
+    for (const answer of ruled) {
+      expect(answer.answerClass).toBe('registration');
+      expect(answer.registrationRulings).toHaveLength(1);
+      expect(answer.registrationRulings[0]?.playerId).toBe('p6');
+      expect(answer.registrationRulings[0]?.registersAs.alignment).toBe('evil');
+      // The exact boolean the downstream guard at nightCommands.ts evaluates:
+      // `Array.isArray(value) && value[0] === null` must be TRUE, so that the
+      // command layer demands an `stChoice`. A bare `null` would leave it dead.
+      expect(Array.isArray(answer.value) && (answer.value as readonly (string | null)[])[0] === null).toBe(true);
+      expect((answer.value as readonly (string | null)[])[1]).toBe('p6');
+      expect(answer.display).toMatch(/Storyteller's choosing/);
+    }
+  });
+
+  // The Spy's half of the same clause, and the case that proves the options are
+  // read off `characterIdAtDeath` rather than off a good/evil assumption.
+  it('offers the Spy\'s good registrations to the Undertaker', () => {
+    const b = nineWithSpy();
+    b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
+    b.push('DEATH', { playerId: 'p2', characterIdAtDeath: 'spy', cause: 'execution', executionKind: 'vote' });
+    b.push('PHASE_ADVANCED', { phase: 'night', number: 2 });
+    const answers = undertakerAnswers(toRulesView(b.state), 'p9');
+    expect(answers.map((a) => a.key)).toEqual([
+      'undertaker:p2',
+      'undertaker:p2:townsfolk',
+      'undertaker:p2:outsider',
+    ]);
+    expect(answers.slice(1).every((a) => a.registrationRulings[0]?.registersAs.alignment === 'good')).toBe(true);
+  });
+
+  // An unambiguous executed character must gain nothing: one answer, canonical.
+  it('offers no registration answer for an unambiguous executed character', () => {
+    const b = nine();
+    b.push('PHASE_ADVANCED', { phase: 'day', number: 1 });
+    b.push('DEATH', { playerId: 'p3', characterIdAtDeath: 'washerwoman', cause: 'execution', executionKind: 'vote' });
+    b.push('PHASE_ADVANCED', { phase: 'night', number: 2 });
+    const answers = undertakerAnswers(toRulesView(b.state), 'p9');
+    expect(answers).toHaveLength(1);
+    expect(answers[0]?.answerClass).toBe('canonical');
+  });
 });
 
 describe('ravenkeeperAnswers (§6.4, guide §13)', () => {

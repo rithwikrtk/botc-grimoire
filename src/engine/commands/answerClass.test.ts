@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest';
 import { createStore, type Store } from './store';
 import { assignRoles, beginFirstNight, createGame } from './setupCommands';
-import { autoSkipUnmetSteps, candidatesForCurrentStep, resolveStep, skipStep } from './nightCommands';
+import {
+  advanceToDay,
+  autoSkipUnmetSteps,
+  candidatesForCurrentStep,
+  resolveStep,
+  skipStep,
+} from './nightCommands';
 import { nextStep } from '../selectors/nightCursor';
 
 /**
@@ -83,6 +89,35 @@ function seededForInvestigator(): Store {
   );
   assignRoles(store, {
     assignments: Object.fromEntries(INVESTIGATOR_ROLES),
+    distribution: { townsfolk: 7, outsider: 2, minion: 2, demon: 1 },
+    setupModifiers: [],
+    demonBluffs: ['washerwoman', 'librarian', 'slayer'],
+    drunkBelief: null,
+    redHerring: 'p6',
+  });
+  beginFirstNight(store);
+  return store;
+}
+
+/**
+ * The Investigator roster with one more same-team substitution: p12 virgin ->
+ * undertaker (townsfolk for townsfolk). Still 7/2/2/1. This is the only roster
+ * in the suite that has the Undertaker and the Recluse at once, which is what
+ * an executed-Recluse registration ruling needs.
+ */
+const UNDERTAKER_ROLES: Array<[string, string]> = INVESTIGATOR_ROLES.map(([id, character]) =>
+  id === 'p12' ? [id, 'undertaker'] : [id, character],
+);
+
+function seededForUndertaker(): Store {
+  let tick = 1_700_000_000_000;
+  const store = createStore([], () => (tick += 1000));
+  createGame(
+    store,
+    UNDERTAKER_ROLES.map(([id], index) => ({ id, name: `P${index + 1}` })),
+  );
+  assignRoles(store, {
+    assignments: Object.fromEntries(UNDERTAKER_ROLES),
     distribution: { townsfolk: 7, outsider: 2, minion: 2, demon: 1 },
     setupModifiers: [],
     demonBluffs: ['washerwoman', 'librarian', 'slayer'],
@@ -200,6 +235,56 @@ describe('answer classes (§4.3)', () => {
     expect(() =>
       resolveStep(store, { answerKey: ruled.key, answerClass: 'registration', stChoice: 'Baron' }),
     ).not.toThrow();
+  });
+
+  // FIX 2 (Important) — the end of the Undertaker route, not just the resolver's
+  // shape. Guide §1: the Recluse "might register as evil, and as a Minion or
+  // Demon, EVEN IF DEAD". Before this, `resolveAnswer` had no key to offer for
+  // an executed Recluse shown as a Minion, so the Storyteller's only route was
+  // `st_override` — which §4.3/§9 keep out of the registration ledger. This
+  // asserts the ruling actually reaches `registrationHistory`, which is the
+  // thing §16.6's contradiction check reads.
+  it('records an executed Recluse ruled as a Minion in the registration ledger', () => {
+    const store = seededForUndertaker();
+    // Skip the whole first night, execute the Recluse on day 1, wake on night 2.
+    let guard = 0;
+    while (nextStep(store.getState()) !== null) {
+      skipStep(store, 'st_skip');
+      if (++guard > 80) throw new Error('night 1 did not terminate');
+    }
+    advanceToDay(store);
+    store.transaction('execute the Recluse on day 1', (tx) => {
+      tx.emit('DEATH', {
+        playerId: 'p10',
+        characterIdAtDeath: 'recluse',
+        cause: 'execution',
+        executionKind: 'vote',
+      });
+      tx.emit('DAY_CLOSED', {});
+      tx.emit('PHASE_ADVANCED', { phase: 'night', number: 2 });
+    });
+
+    walkTo(store, 'undertaker');
+    const ruled = candidatesForCurrentStep(store).find(
+      (c) => c.key === 'undertaker:p10:minion',
+    );
+    if (!ruled) {
+      throw new Error(
+        'Expected a registration-class Undertaker candidate for the executed Recluse. ' +
+          `Got: ${candidatesForCurrentStep(store).map((c) => c.key).join(', ') || 'none'}`,
+      );
+    }
+    expect(ruled.answerClass).toBe('registration');
+
+    resolveStep(store, {
+      answerKey: ruled.key,
+      answerClass: 'registration',
+      stChoice: 'Baron',
+    });
+
+    expect(store.getState().registrationHistory).toEqual([
+      [{ playerId: 'p10', registersAs: { alignment: 'evil', team: 'minion' } }],
+    ]);
   });
 
   // §4.1 — the field carries the actor's perceived character. Fix round 1,

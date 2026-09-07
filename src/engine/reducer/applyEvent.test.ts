@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from 'vitest';
 import { applyEvent, initialState, reduce } from './fold';
-import type { GameEvent } from '../events';
+import type { EventType, GameEvent } from '../events';
 
 // Reset before every test, not just inside fivePlayerLog: relying on a reset
 // buried in one helper made every later evt(...) call depend on that helper
@@ -48,6 +48,95 @@ function fivePlayerLog(): GameEvent[] {
   ];
 }
 
+/**
+ * FIX I6 — the frozen event catalogue, in the style of `STEP_IDS`'
+ * snapshot in nightOrder.test.ts.
+ *
+ * This is what stands behind §18. Seat and roster immutability are enforced by
+ * the ABSENCE of a write path — `seat` is assigned in exactly one place
+ * (`GAME_CREATED` below) and there is no reseat/add/remove event — which is a
+ * stronger guarantee than any test. But "there is no such event" was itself
+ * unwitnessed: adding `PLAYER_RESEATED` to the catalogue tomorrow reddened
+ * nothing anywhere in the tree. It reddens here.
+ *
+ * The `Record<EventType, true>` annotation makes it fail TWICE for the price of
+ * one: adding or removing a payload key in events.ts is a compile error here
+ * (missing / excess property), and the assertion below pins the names and count
+ * so a rename is a reviewed edit to a test rather than a silent break of the
+ * replay contract.
+ */
+const EVENT_TYPES: Record<EventType, true> = {
+  GAME_CREATED: true,
+  PLAYER_RENAMED: true,
+  ROLES_ASSIGNED: true,
+  ROLE_CHANGED: true,
+  PHASE_ADVANCED: true,
+  DAY_CLOSED: true,
+  NIGHT_STEP_RESOLVED: true,
+  NIGHT_STEP_SKIPPED: true,
+  NIGHT_KILL_RESOLVED: true,
+  STATUS_APPLIED: true,
+  STATUS_CLEARED: true,
+  DEATH: true,
+  DEMON_DIED: true,
+  NOMINATION_OPENED: true,
+  VOTE_CAST: true,
+  NOMINATION_CLOSED: true,
+  EXECUTION: true,
+  VIRGIN_TRIGGERED: true,
+  SLAYER_CLAIMED: true,
+  RULE_FLAGGED: true,
+  NOTE_ADDED: true,
+  SPY_VIEWED: true,
+  SPY_VIEW_ENDED: true,
+  GAME_ENDED: true,
+};
+
+describe('the frozen event catalogue (§3.6, §18)', () => {
+  it('is exactly these event types', () => {
+    expect(Object.keys(EVENT_TYPES).sort()).toEqual([
+      'DAY_CLOSED',
+      'DEATH',
+      'DEMON_DIED',
+      'EXECUTION',
+      'GAME_CREATED',
+      'GAME_ENDED',
+      'NIGHT_KILL_RESOLVED',
+      'NIGHT_STEP_RESOLVED',
+      'NIGHT_STEP_SKIPPED',
+      'NOMINATION_CLOSED',
+      'NOMINATION_OPENED',
+      'NOTE_ADDED',
+      'PLAYER_RENAMED',
+      'PHASE_ADVANCED',
+      'ROLES_ASSIGNED',
+      'ROLE_CHANGED',
+      'RULE_FLAGGED',
+      'SLAYER_CLAIMED',
+      'SPY_VIEWED',
+      'SPY_VIEW_ENDED',
+      'STATUS_APPLIED',
+      'STATUS_CLEARED',
+      'VIRGIN_TRIGGERED',
+      'VOTE_CAST',
+    ].sort());
+  });
+
+  // §18 stated as the property it actually is, so the reason this list is frozen
+  // survives in the file rather than only in a review.
+  it('contains no event that moves a player between seats, or adds or removes one', () => {
+    const rosterMutating = Object.keys(EVENT_TYPES).filter((type) =>
+      /RESEAT|SEAT|PLAYER_ADDED|PLAYER_REMOVED|PLAYER_SEATED|ROSTER/.test(type),
+    );
+    expect(rosterMutating).toEqual([]);
+    // PLAYER_RENAMED is the one roster-touching event, and it is typos only
+    // (§18) — it carries a name and nothing else.
+    expect(Object.keys(EVENT_TYPES).filter((t) => t.startsWith('PLAYER_'))).toEqual([
+      'PLAYER_RENAMED',
+    ]);
+  });
+});
+
 describe('applyEvent — envelope and roster', () => {
   it('seats players in the order given and derives nothing else from GAME_CREATED', () => {
     const state = reduce(fivePlayerLog().slice(0, 1));
@@ -94,6 +183,39 @@ describe('applyEvent — envelope and roster', () => {
       evt('PHASE_ADVANCED', { phase: 'night', number: 2 }),
     ];
     expect(reduce(log).phase).toEqual({ kind: 'night', number: 2 });
+  });
+
+  // FIX 4c — the reducer's ONLY phase-monotonicity guarantee, and it had no
+  // test: replacing the condition with `false` left the whole suite green. Every
+  // status lifetime is expressed as a phase window (§4.4) and `comparePhases`
+  // decides expiry, so a log that goes backwards would silently resurrect
+  // expired poison, protection and Master marks for the rest of the game.
+  //
+  // The advisory fuzzer cannot reach this — its generator only ever advances —
+  // which is now said in its own `play()` docstring.
+  it('refuses a PHASE_ADVANCED that goes backwards, or repeats the current phase', () => {
+    const log = [...fivePlayerLog(), evt('PHASE_ADVANCED', { phase: 'day', number: 2 })];
+    const state = reduce(log);
+    expect(state.phase).toEqual({ kind: 'day', number: 2 });
+
+    // Backwards by number.
+    expect(() => applyEvent(state, evt('PHASE_ADVANCED', { phase: 'night', number: 1 }))).toThrow(
+      /went backwards/i,
+    );
+    // Backwards within the same number: night 2 precedes day 2.
+    expect(() => applyEvent(state, evt('PHASE_ADVANCED', { phase: 'night', number: 2 }))).toThrow(
+      /went backwards/i,
+    );
+    // Not strictly forward: the same phase again. `<= 0` is the comparison, not
+    // `< 0`, so this is the boundary the guard is written to catch.
+    expect(() => applyEvent(state, evt('PHASE_ADVANCED', { phase: 'day', number: 2 }))).toThrow(
+      /went backwards/i,
+    );
+    // ...and the legitimate next phase still applies.
+    expect(applyEvent(state, evt('PHASE_ADVANCED', { phase: 'night', number: 3 })).phase).toEqual({
+      kind: 'night',
+      number: 3,
+    });
   });
 
   it('clears todaysExecutions when a new day opens, not when a night opens', () => {
