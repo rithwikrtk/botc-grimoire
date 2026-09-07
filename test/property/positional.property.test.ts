@@ -9,8 +9,15 @@ import type { RulesView } from '@/engine/types';
 /**
  * Builds an arbitrary ring. Evil placement is arbitrary rather than legal: the
  * positional maths must not depend on the distribution chart, and generating
- * illegal-but-well-formed rings covers the all-adjacent and fully-wrapped edges
- * that no legal set reaches.
+ * illegal-but-well-formed rings covers adjacent runs of every length and
+ * wrap-around adjacency that no legal set reaches.
+ *
+ * NOTE: `makeView` below always excludes the Empath's own seat from the evil
+ * set (their seat must be good and alive to ask the question at all), so this
+ * generator can never produce a fully-evil ring — `evilCount` is capped at
+ * `size - 1`. The fully-evil special case (`chefPairs`'s `evilCount === size`
+ * branch) is covered separately by a direct unit test in seating.test.ts that
+ * does not go through this generator.
  */
 const ringArb = fc
   .integer({ min: 7, max: 15 })
@@ -102,7 +109,7 @@ describe('positional information — property tests against a naive reference (�
         const { view, empathId } = makeView(spec);
         const evils = view.players.filter((p) => p.alignment === 'evil').length;
         expect(empathCount(view, empathId)).toBeLessThanOrEqual(2);
-        expect(chefPairs(view)).toBeLessThanOrEqual(Math.max(evils, 0));
+        expect(chefPairs(view)).toBeLessThanOrEqual(evils);
       }),
       { numRuns: 300 },
     );

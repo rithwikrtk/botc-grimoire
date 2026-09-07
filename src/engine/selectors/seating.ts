@@ -36,6 +36,12 @@ export function ringOrder(view: RulesView): RulesViewPlayer[] {
  * §6.4 — the Empath's ALIVE neighbours, skipping the dead around the circle.
  * Deduped: with only one other living player, they are both neighbours and are
  * counted once. Returns 0, 1 or 2 players, seat-ordered.
+ *
+ * Answers even when `playerId` itself is dead (the walk only excludes the
+ * subject's own seat, not their life state) — unlike `referenceEmpathCount`,
+ * which throws for a dead subject. Not a bug: the Empath ability only ever
+ * wakes a living player, so this case never arises in play; the divergence is
+ * simply undocumented on the reference side, which is deliberately left alone.
  */
 export function aliveNeighbours(view: RulesView, playerId: PlayerId): RulesViewPlayer[] {
   const ring = ringOrder(view);
@@ -163,17 +169,32 @@ export function empathDerivation(
   const neighbours = aliveNeighbours(view, playerId);
   const count = empathCount(view, playerId, overrides);
 
-  // A window of the ring wide enough to show what was skipped in each direction.
-  const window: string[] = [];
+  // A window of the ring wide enough to show what was skipped in each
+  // direction. Deduped by seat index: at fewer than 8 seats, a fixed ±3 span
+  // wraps back over seats it already visited, which would otherwise print the
+  // same player twice (and, if they are dead, print "(dead)" twice for one
+  // corpse). Deduping collapses that to the true ring, in order.
+  const seenIndices = new Set<number>();
+  const windowIndices: number[] = [];
   for (let offset = -3; offset <= 3; offset += 1) {
-    const player = ring[mod(selfIndex + offset, size)]!;
-    const label =
-      player.id === self.id ? `[${player.name}]` : player.alive ? player.name : `${player.name} (dead)`;
-    window.push(label);
+    const index = mod(selfIndex + offset, size);
+    if (seenIndices.has(index)) continue;
+    seenIndices.add(index);
+    windowIndices.push(index);
   }
+  const windowLabels = windowIndices.map((index) => {
+    const player = ring[index]!;
+    return player.id === self.id ? `[${player.name}]` : player.alive ? player.name : `${player.name} (dead)`;
+  });
+  // If the deduped window already contains every seat, there is nothing beyond
+  // it left to elide — the bracketing "..." would otherwise claim seats that
+  // do not exist (§14: a false ring in the audit trail is worse than no audit
+  // trail).
+  const spansWholeRing = windowIndices.length === size;
+  const seatsDetail = spansWholeRing ? windowLabels.join(' | ') : `... ${windowLabels.join(' | ')} ...`;
 
   return [
-    { label: 'seats', detail: `... ${window.join(' | ')} ...` },
+    { label: 'seats', detail: seatsDetail },
     {
       label: 'nearest alive either side, skipping the dead',
       detail: neighbours.length > 0 ? neighbours.map((p) => p.name).join(' · ') : 'nobody alive',
