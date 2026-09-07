@@ -94,17 +94,11 @@ export function deal(playerIds: readonly PlayerId[], pick: Picker): DealResult {
   }
 
   // Characters are placed onto seats by the picker's own order over the seats, so
-  // the ordering of the draw does not leak into the seating. Zipped against a
-  // reversed copy of `drawn`: the draw always puts the Demon first (§5.2's
-  // order), so zipping forward would pair the Demon with whichever seat comes
-  // first under any picker that preserves order — including the deterministic
-  // test fixtures — leaking the draw order into the seating after all.
-  // Reversing breaks that correlation without touching the entropy source.
+  // the ordering of the draw does not leak into the seating.
   const seatOrder = pick(playerIds, playerIds.length);
-  const seatDeck = [...drawn].reverse();
   const assignments: Record<PlayerId, CharacterId> = {};
   seatOrder.forEach((playerId, index) => {
-    assignments[playerId] = seatDeck[index]!.id;
+    assignments[playerId] = drawn[index]!.id;
   });
 
   const inPlay = new Set(drawn.map((c) => c.id));

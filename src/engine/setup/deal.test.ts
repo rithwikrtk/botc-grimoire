@@ -158,8 +158,14 @@ describe('deal — the red herring (§5.2)', () => {
 describe('validateDeal', () => {
   it('rejects a hand-edited set with two Demons', () => {
     const result = deal(ids(7), front);
-    const [firstId] = Object.keys(result.assignments);
-    const broken = { ...result, assignments: { ...result.assignments, [firstId!]: 'imp' } };
+    // Take a seat that is demonstrably not already the Demon's, so overwriting it
+    // with 'imp' is guaranteed to create a genuine second Demon rather than a
+    // no-op — relying on key order here would only pass by luck of picker order.
+    const nonDemonId = Object.entries(result.assignments).find(
+      ([, c]) => characterById(c).team !== 'demon',
+    )?.[0];
+    expect(nonDemonId).toBeDefined();
+    const broken = { ...result, assignments: { ...result.assignments, [nonDemonId!]: 'imp' } };
     expect(validateDeal(ids(7), broken).join(' ')).toMatch(/demon/i);
   });
 
@@ -219,8 +225,16 @@ describe('validateDeal', () => {
 
   it('keeps a one-player reroll legal', () => {
     const result = deal(ids(9), front);
-    const [firstId] = Object.keys(result.assignments);
-    const rerolled = rerollOne(result, firstId!, (items, count) => items.slice(-count));
+    // Reroll a non-Demon seat: the edition has only one Demon character, so
+    // rerolling the Demon has no legal replacement and is a no-op — picking
+    // whichever seat happens to be first in key order (which, under an
+    // order-preserving picker, is the Demon's) would only exercise that no-op
+    // path instead of the actual swap this test means to check.
+    const nonDemonId = Object.entries(result.assignments).find(
+      ([, c]) => characterById(c).team !== 'demon',
+    )?.[0];
+    expect(nonDemonId).toBeDefined();
+    const rerolled = rerollOne(result, nonDemonId!, (items, count) => items.slice(-count));
     expect(validateDeal(ids(9), rerolled)).toEqual([]);
   });
 
