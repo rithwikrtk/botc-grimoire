@@ -132,7 +132,7 @@ millisecond".
 
 ```
 GAME_CREATED        { players: [{id, name, seat}], edition: {id, version} }
-PLAYER_CHANGED      { playerId, op: 'add'|'remove'|'rename'|'reseat', ...fields }
+PLAYER_CHANGED      { playerId, op: 'rename'|'reseat', ...fields }
 
 ROLES_ASSIGNED      { assignments: {playerId: characterId},
                       distribution: {townsfolk, outsiders, minions, demons},
@@ -426,8 +426,9 @@ Woman's `ROLE_CHANGED` lands, undoing §4.6 entirely.
 | 4 | Good | `aliveCount === 3`, Mayor alive and functional, and `todaysExecutions.length === 0` | day-close tx |
 
 Row 1 precedes row 3: a Demon death that brings the count to 2 is a **good** win.
-Row 3 uses `<=`, not `==`, because `PLAYER_CHANGED { op:'remove' }` can step over 2.
-Any transaction changing the living set triggers the check, including player removal.
+Row 3 uses `<=` rather than `==` defensively — deaths arrive one at a time so the
+count should never skip 2, but an equality test that is wrong once ends the game
+never, and the looser comparison costs nothing.
 
 Surfaced as a blocking modal. `nextStep()` returns null once `victory.status !==
 'ongoing'`, so the night cannot continue past the end of the game.
@@ -478,20 +479,18 @@ Two classes, because they deserve different handling:
 
 ### 5.6 Roster changes mid-game
 
-`PLAYER_CHANGED` exists because late arrivals, departures and typos are real. Its
-semantics are specified here rather than left to the implementer, because seat
-adjacency feeds Chef and Empath.
+The roster is **fixed once roles are locked in**. Nobody joins or leaves a game in
+progress — see §18. Two edits remain, because both are typo-and-chair-shuffle
+reality rather than roster changes:
 
 | `op` | Effect |
 |---|---|
 | `rename` | Cosmetic. Nothing else changes. |
-| `reseat` | The circle is rebuilt. Adjacency-derived answers already given become stale — flagged, never rewritten. |
-| `remove` | **The player leaves the circle; they are not marked dead.** Adjacency closes over the gap, `aliveCount` drops, and the execution threshold changes. This matches the table: an absent player is not a corpse sitting between two neighbours. To treat someone as dead instead, emit `DEATH { cause: 'other' }` and leave them seated. |
-| `add` | Requires an explicit character assignment. The public distribution is now inconsistent with the player count — flagged loudly, because guide §8 makes those counts public and the table will notice. |
+| `reseat` | The circle is rebuilt. Seat adjacency feeds Chef and Empath, so positional answers already given become stale — flagged via `RULE_FLAGGED { class: 'integrity' }`, and never rewritten. What was said at the table stands as spoken. |
 
-In every case, information already given from the old seating stands as spoken.
-`RULE_FLAGGED { class: 'integrity' }` records that downstream positional answers may
-no longer reconcile, and `checkVictory` runs — a removal can cross the 2-alive line.
+`reseat` exists because people genuinely do swap chairs on the way back from the
+kitchen, and a circle that no longer matches the room makes every subsequent Empath
+answer wrong. §5.5's dusk seating check is what catches it.
 
 ---
 
@@ -978,7 +977,8 @@ precedence (§11); no action closed the day or ended a game, leaving the Mayor w
 `reason: 'abandoned'` unreachable (§7); private-mode detection by sentinel could not
 distinguish a first run (§12.3); Scarlet Woman vs starpass precedence reversed
 (§4.6, §16.9); plus import-during-game, Spy Mode effectiveness leakage, and the
-per-actor scope of `perceivedCharacterId`.
+per-actor scope of `perceivedCharacterId`. Mid-game player add/remove was then cut
+from scope entirely; `PLAYER_CHANGED` keeps only `rename` and `reseat`.
 
 **v2 fixed** (from a three-lens review): the Drunk never waking; no win-condition
 engine; the night queue built before mid-night conditions were knowable; "compute the
@@ -990,7 +990,10 @@ daytime path; ability effects ungated by poison/drunk.
 
 Custom scripts, Travellers, Fabled, multiplayer or networked play, accounts,
 multi-game archive, a live Spy link on a second device, practice mode, a
-paper-handoff snapshot screen. **Never** put game state in a URL fragment or query
+paper-handoff snapshot screen, and **mid-game roster changes** — players do not join
+or leave once roles are locked in, so there is no add or remove path (§5.6). A player
+who must drop out is handled as a death like any other: `DEATH { cause: 'other' }`,
+left seated, adjacency unchanged. **Never** put game state in a URL fragment or query
 string — it would land in history, the address bar and autocomplete.
 
 Other editions are out of scope to *build*, not to *accommodate*: no other-edition
