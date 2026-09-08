@@ -1,0 +1,92 @@
+# Deferred minors and parked findings — Plan 1, Tasks 1-18
+# Each line is one item, as recorded in the SDD ledger at the time.
+
+Task 1: minor (deferred): purity.setup.ts:63-66 — afterEach's three direct re-assignments are redundant once the `restores` descriptor-restore array has run. Harmless; touch only if the file is edited again.
+
+Task 1: minor (deferred): the `^9.15.0` eslint range now resolves to 9.39.5, which npm install reports as already deprecated ("no longer supported"). Not test-output noise and not in Task 1's scope; a signal for whoever revisits dependency ranges.
+
+Task 2: minor (deferred): `characters.ts:105-106` docstring describes an empty `registration` array, a case the data never produces — folded into fix round 1 since the implementer is already in the file, and a Task 8 implementer would read it and be misled.
+
+Task 2: minor (deferred): no automated assertion locks the 22 `abilityText` strings. Plan 2 renders them verbatim with no second source, and I already found two drift instances in the plan itself, so a code snapshot (the treatment Task 9 gives `STEP_IDS`, for the same replay-contract reason) has real value. Not expanding Task 2 for it — final review triages.
+
+Task 2: minor (deferred): registration.test.ts:254 re-derives alignment inline instead of calling the exported `alignmentOf`.
+
+Task 2: minor (deferred): the `Object.isFrozen` test covers `washerwoman`, whose array is pre-frozen at declaration — it does not cover `recluse`/`spy`, whose arrays depend on the factory's freeze catching an un-pre-frozen override literal. That is the case that would actually witness a factory-freeze regression. Production code verified correct on both paths by direct read, so this is coverage, not a gap.
+
+Task 3: minor (deferred): phase.ts:152-156 — the future-application guard is correct but undocumented as deliberate; one comment would spare the next reader the derivation this review had to do.
+
+Task 4: minor (deferred): three cases (`ROLE_CHANGED` re-assert, `NOMINATION_CLOSED` double-close, `GAME_ENDED` duplicate) lack a no-change short-circuit, so §3.5's "identical state object" property holds only where a short-circuit happens to exist. All three are duplicate-event paths the command layer does not produce.
+
+Task 4: minor (deferred): double `characterById` lookup at three sites (alignment derivable from the already-fetched `character.team`).
+
+Task 4: minor (deferred): `initialState()` hardcodes `edition: { id: 'troubleBrewing', version: '0' }`, so a state that never saw `GAME_CREATED` claims to be a Trouble Brewing game. `{ id: '', version: '' }` would be honest.
+
+Task 4: minor (deferred): no idempotency guard on `NOMINATION_OPENED`/`NOTE_ADDED` duplicate ids; commands own id generation, so theoretical.
+
+Task 4: minor (deferred): determinism.test.ts's purity assertion largely duplicates the double-reduce test, since both run in the armed `reducer-purity` project.
+
+Task 7: minor (deferred): dead defensive code mirrored on both sides — `seating.ts:391`'s self-skip and `reference.ts:74-75`'s delete are both unreachable. Left alone deliberately: editing `reference.ts` for cosmetics risks the independence property that is this task's whole value, and the cost of the dead lines is that they read as guarding a real case.
+
+Task 7: minor (deferred): the `ringOrder` "seat+1 = left-hand neighbour" assertion I asked for is largely tautological given its sibling test — once `ringOrder` is known seat-ascending with no gaps, it follows. **My request, not the implementer's choice**: it protects less against a reversed voting-order convention than I implied when I asked for it. The orientation convention is still effectively pinned only by comment, and the real guard belongs wherever vote order is consumed (Task 14's `voteOrder`).
+
+Task 8: minor (deferred): resolvers.ts:283-286/372/389 — `couldRegisterAs` and `ambiguousAmong` guard `characterId === ''` while the Fortune Teller, Ravenkeeper and Undertaker call `characterById` unguarded, so either the guards are dead or those three throw on a pre-deal view. Unreachable in operation: information steps exist only after the deal, and §3.6's recompute-on-log-expansion only ever replays a night step's own seq. Left for the final review rather than papered over with an unverified comment claiming unreachability.
+
+Task 8: minor (deferred): resolvers.ts:364-366 — the Ravenkeeper takes `targets[0]!` and silently drops extras, unlike the Fortune Teller's §4.8 derivation treatment. Not escalated: target *count* is bounded by the step's `targets` spec at the picker, whereas §4.8's soft constraints govern *who* may be picked, not how many.
+
+Task 8: minor (deferred): resolvers.test.ts:202-209's stable-key test never exercises the Fortune Teller (which is why Minor 5 escaped it) and passes the Washerwoman as the Investigator's actor.
+
+Task 8: minor (deferred): the key-stability test's equality half compares two calls of a deterministic pure function, so it cannot fail — and a key that genuinely depended on iteration order would still compare equal, so the invariant its comment claims is not the one tested. Folded into fix round 1 (the uniqueness half is the real assertion; the Fortune Teller was also absent from it, which is why it missed the duplicate-key bug).
+
+Task 8: minor (deferred): `oneOfTwo`'s key would collide only if a character carried two registration options on the same team; no Trouble Brewing character does. Left as-is deliberately — an option index would buy nothing today and the uniqueness test would catch a data change, though it would read as a test bug rather than a data bug.
+
+Task 8: minor (deferred): the `washerwomanAnswers` Drunk exclusion set is redundant with `couldRegisterAs` today and nothing keeps it honest. Kept deliberately as belt-and-braces on the §6.4 asymmetry, on the same reasoning as Task 6's retained guards.
+
+Task 9: minor (deferred): the §15 night-order-rationale test cannot fail *independently* — every relation it asserts is implied by the exact-order snapshot beside it. Kept rather than deleted: unlike the vacuous tests cut in Tasks 5 and 6 it does not certify something it cannot check, it is redundant rather than false, and it carries the guide's status-modifiers→info-leakers→kill→reactive rationale in a readable form. Flagged for the final review's trim pass.
+
+Task 9: minor (deferred): dead surface — `export type { PlayerId }` is imported solely to be re-exported and used nowhere, and the edition barrel has zero importers today (the cursor imports `nightOrder` directly, which is also what keeps it cycle-free). Brief-mandated with Plan 2 as the stated consumer, so left alone.
+
+Task 9: minor (deferred) — **and carried forward to Plan 2 rather than fixed here.** §6.2's `showCard` is a **single** value, but the guide's Demon info step shows **two** cards: "these are your minions" and the three not-in-play bluffs. So `demon_info` declares `these_are_your_minions` and the bluffs card survives only in the instruction prose — and `'not_in_play'` is consequently a declared `showCard` variant no step uses, which strongly suggests §6.2 intended it for exactly this step. A UI driven off `showCard` would never render the bluffs card. I am **not** changing the shape: `showCard` is the spec's interface, nothing consumes it yet, and a unilateral mid-execution interface change ripples into Plan 2 and §6.2. This is a spec self-inconsistency of the same class as R5 (§7 vs §4.7). Folding in only a comment at the step so Plan 2's implementer meets it at the point of use rather than in a ledger, and surfacing it to the final review.
+
+Task 10: minor (deferred): property 4 replays `playTrace` from scratch per `cut` iteration, O(n²) reduce calls. Harmless at numRuns 200 / maxLength 5.
+
+Task 10: minor (deferred): the "keeps night-N poison active through day N" property only ever exercises `actions[0]` and discards the rest of each generated array — correct and non-vacuous, but most of its generation budget goes to a single-night scenario.
+
+Task 10: minor (deferred): the two-trace comparisons lean on fast-check's counterexample dump rather than a custom failure message naming which `cut`/branch diverged.
+
+Task 11: minor (deferred): `killDerivation` is extra surface relative to the two named functions, but verbatim brief-mandated, so not drift.
+
+Task 12: minor (deferred): `demonDeathDerivation`'s `needs_successor_choice` branch has three reachable `why` sub-cases (no Scarlet Woman / below threshold / the constant is false); only the below-threshold case has a rendered-string assertion. The other two were verified correct by reading, so this is an unpinned-prose gap rather than a defect — a future edit to that ternary could change the wording without reddening a test.
+
+Task 13: minor (deferred): `onVictoryCheck` is a test-only hook on the production `TransactionOptions` surface. Brief-mandated; flagged for the final review rather than removed mid-plan, since Tasks 14-18 may pass options through.
+
+Task 13: minor (deferred): repeated `undo()` has no floor and will undo the `GAME_CREATED` transaction, and combined with the Spy skip-past it can strip history from *around* a retained `SPY_VIEWED`, leaving the audit trail attesting to a grimoire state no longer in the log. Brief-mandated, and the alternative — one Spy view permanently disabling undo — is worse.
+
+Task 13: minor (deferred): store.ts:497-499 — the new broken-predicate throw does not decrement `txCounter`, unlike the other two throw paths in `transaction()`, so if it ever fired it would permanently skip a txId. Practically unreachable (every victory predicate carries a non-null reason) and a skipped txId is not a correctness hazard — `highestTxNumber` and undo tolerate gaps by design. Cosmetic asymmetry.
+
+Task 14: minor (deferred): a `butler_without_master` flag emitted at `castVote` time is never retracted once the Master votes, because `RuleFlag` has no resolved/superseded field — so the flag list will disagree with the `butlerVotesFlagged` written at close, which correctly clears. Mitigated by the detail text, which says in as many words that the restriction is satisfied if the Master votes. Not fixed here: `RuleFlag` is Task 3/4's shape and adding a field ripples through the reducer and Plan 2's flag rendering. Real, and the final review should decide whether Plan 2 renders flags with that caveat or the shape changes.
+
+Task 14: minor (deferred): `closeDay` is re-entrant across transactions — nothing records that the day closed (`DAY_CLOSED` is a reducer no-op), so a second call re-resolves the same day. Harmless today **only** because `resolveDayExecution`'s `row.nomineeAlive` filter excludes the now-dead nominee, which means that clause is load-bearing for more than its documented purpose. Worth a guard or at least a comment; not expanding this round for it, and finding 1's phase precondition does not close it (both calls are in the day phase).
+
+Task 16: minor (deferred): `registrationLedger.ts` compares only `registersAs.team` and ignores `registersAs.alignment`. Unreachable in Trouble Brewing, where team determines alignment, but the field is on the type and a second edition breaks the check silently. §3.8's known-debt class.
+
+Task 16: minor (deferred): two mutually contradictory rulings **within a single event's** `registrationRulings` array are never flagged, because the check reads pre-transaction state. Real but not reachable through any command in the plan — no producer emits two rulings about one player in one event.
+
+Task 16: minor (deferred): the §16.6 test is genuine but **synthetic** — it attaches rulings to Poisoner and Monk steps, which no real Storyteller flow produces. Finding 3's resolver-backed test and finding 6's day-site tests together give §16.6 a realistic route; the synthetic one stays because it pins the command wiring.
+
+Task 16: minor (deferred): `nightCommands.ts` is 386 lines with five responsibilities (answer-class enforcement, target flagging, step resolution, the kill chain, phase advance). Cohesive today; `resolveAnswer` and `flagTargetIssues` are the natural extraction if §4.3 or §4.8 grow. For the final review's trim pass.
+
+Task 16: minor (deferred): `eslint.config.js`'s `ignores` comment for `src/engine/index.ts` is now stale — it says the barrel re-exports `perceivedCharacterId` for its sanctioned consumers, which is no longer true after FIX 2. Harmless (the barrel imports neither name, so the rule has nothing to fire on) but misleading. For the final review's trim pass.
+
+Task 17: minor (deferred): the other half of M5 — `expect(player.seat).toBe(5)` cannot be reddened from this task's files, because no code path anywhere writes `seat`. Kept rather than deleted, unlike Task 6's hollow assertion: it does weakly witness that `recordDeath` leaves the player in the array at their index, and §18's seat invariant has a far stronger guard arriving in Task 18's advisory property test, which asserts the whole seat array against `0..n-1` over arbitrary generated event streams. Recording it so the final review knows Task 18's property test is the real witness and this one is documentation at the point of use.
+
+Task 17: minor (deferred): `changeRole`'s `wouldDoubleDemon` duplicates the reducer's guard at applyEvent.ts:254-258. Byte-equivalent today, and **both directions are pinned** (the double-Demon test asserts the flag *and* that the change was refused; the legal-change test asserts no flag *and* that it applied), so unlike Task 9's `requiresAlive` duplication this one has a test that fails if the copies disagree. Not extracted because the command would have to import a reducer-internal predicate or the reducer would have to import from `commands/` — neither is free. For the final review's triage, since a future divergence regresses straight back to the silent no-op this task exists to remove.
+
+Task 17: minor (deferred): `addNote` with `scope: 'game'` **and** a `playerId` validates the id and then attaches it to the event anyway, so a game-scoped note can carry a player reference. Pre-existing in the brief's conditional spread and unchanged by the fix round; the coherent alternative is to ignore `playerId` outside player scope, which would silently drop a caller's argument. For the final review to decide which.
+
+Task 18: minor (deferred): `answersAtSeq`'s `if (!resolver) return []` makes a typo'd `stepId` indistinguishable from a legitimately answer-less step (the Poisoner, Monk, Butler and Spy all correctly return `[]`). A `STEP_IDS` membership check would separate them and would match the malformed-input line this plan has drawn four times. Not folded in: Plan 2's log-expansion UI is the only caller and it passes a `stepId` off a real event, so the typo is not reachable through the intended path, and the fix costs an import that couples the replay selector to the frozen step list. For the final review, which sees Plan 2's seam.
+
+Task 18: minor (deferred): `expect(ruleFlags).toEqual([])` in the st_override test cannot be reddened by deletion, because nothing raises a flag on an `answerClass` today. Kept as a forward guard for §4.3's "never warned", which is a real requirement with no other expression.
+
+Task 18: minor (deferred): `expect(night2).not.toContain('poisoner')` is near-tautological — the roster has no Poisoner and `nextStep` skips zero-actor steps. Harmless, and its misleading comment ("they are dead") was already corrected under R23.
+
+Task 18: minor (deferred): the fix round's own `play()` docstring still illustrates the swallowed -error case with "a backwards `PHASE_ADVANCED` throws", which this generator can never reach — the same misleading-comment class this plan has cut four times. One sentence; not worth a second round, and the assertion it accompanies is sound.
